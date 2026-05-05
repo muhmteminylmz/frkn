@@ -1,8 +1,8 @@
 # =========================================================
 # G-HS + OBL + DİNAMİK PAR/BW ile CNN HİPERPARAMETRE OPTİMİZASYONU
 # KAGGLE WASTE CLASSIFICATION (Organic vs Recyclable)
-# KLASİK CNN vs ÖNERİLEN G-HS-CNN
-# ✅ GPU OPTIMIZED + TURBO MODE + FIXED
+# KLASİK CNN (Baseline) vs G-HS-CNN (Önerilen)
+# ✅ GPU OPTIMIZED + tf.data PIPELINE + MIXED PRECISION
 # =========================================================
 
 import os
@@ -15,17 +15,13 @@ import tensorflow as tf
 import matplotlib.pyplot as plt
 
 from dataclasses import dataclass, asdict
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout, BatchNormalization
-from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.preprocessing.image import ImageDataGenerator
-from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 
 warnings.filterwarnings("ignore")
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 # =========================================================
-# GPU SETUP (DirectML)
+# GPU SETUP
 # =========================================================
 os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
 
@@ -39,6 +35,12 @@ if gpus:
             tf.config.experimental.set_memory_growth(gpu, True)
     except RuntimeError as e:
         print(f"GPU Hatası: {e}")
+    # ⚡ Mixed Precision: uyumlu GPU'larda ~2x hız artışı (Compute Capability ≥ 7.0)
+    try:
+        tf.keras.mixed_precision.set_global_policy('mixed_float16')
+        print("⚡ Mixed Precision (float16) AKTİF")
+    except Exception as mp_err:
+        print(f"⚠️ Mixed Precision etkinleştirilemedi, float32 kullanılıyor: {mp_err}")
 else:
     print("\n⚠️ GPU bulunamadı, CPU ile devam edilecek")
 
@@ -61,134 +63,174 @@ set_seed(42)
 # =========================================================
 @dataclass
 class HyperParams:
-    filters: int
-    kernel_size: int
-    dropout: float
+    filters: int        # İlk conv bloğundaki filtre sayısı (sonraki bloklar 2x artar)
+    kernel_size: int    # Konvolüsyon çekirdeği boyutu
+    num_blocks: int     # Conv blok sayısı (derinlik)
+    dropout: float      # Dropout oranı
     learning_rate: float
     batch_size: int
+    dense_units: int    # Fully-connected katman nöron sayısı
 
 
 # =========================================================
-# 2. VERİ YÜKLEME (CACHE İLE)
+# 2. VERİ YÜKLEME (tf.data Pipeline – HIZLI)
 # =========================================================
+# tf.data + AUTOTUNE prefetch: ImageDataGenerator'a göre ~2x daha hızlı
 IMG_SIZE = (128, 128)
-train_dir = "dataset/train"
-test_dir = "dataset/test"
+TRAIN_DIR = "dataset/train"
+TEST_DIR  = "dataset/test"
+AUTOTUNE     = tf.data.AUTOTUNE
+MAX_FILTERS  = 512  # Her blokta 2x artan filtre sayısı için üst sınır
 
-# Global cache
+# Dataset cache (batch_size → (train_ds, val_ds, test_ds))
 _gen_cache = {}
 
 
-def create_generators(batch_size):
-    """Veri yükle (cache'den reuse et)"""
-    
-    key = batch_size
-    if key in _gen_cache:
-        return _gen_cache[key]
-    
-    print(f"📦 Veri yükleniyor (Batch={batch_size})...")
-    
-    # ✅ seed parametresi ImageDataGenerator'dan KALDIRANDI
-    train_datagen = ImageDataGenerator(
-        rescale=1.0 / 255,
-        validation_split=0.2,
-        rotation_range=20,
-        horizontal_flip=True,
-        zoom_range=0.2
-    )
+def create_datasets(batch_size):
+    """tf.data pipeline ile veri yükle (batch_size başına cache'li)"""
+    if batch_size in _gen_cache:
+        return _gen_cache[batch_size]
 
-    test_datagen = ImageDataGenerator(rescale=1.0 / 255)
+    print(f"📦 Dataset pipeline hazırlanıyor (Batch={batch_size})...")
 
-    # ✅ seed'i flow_from_directory'ye TAŞINDI
-    train_gen = train_datagen.flow_from_directory(
-        train_dir,
-        target_size=IMG_SIZE,
+    common = dict(
+        image_size=IMG_SIZE,
         batch_size=batch_size,
-        class_mode="binary",
-        subset="training",
-        shuffle=True,
-        seed=42
+        label_mode='binary',
+        seed=42,
     )
 
-    val_gen = train_datagen.flow_from_directory(
-        train_dir,
-        target_size=IMG_SIZE,
-        batch_size=batch_size,
-        class_mode="binary",
-        subset="validation",
-        shuffle=False,
-        seed=42
-    )
+    # tf.data pipeline [0, 255] ham piksel değeri döndürür;
+    # normalizasyon (Rescaling) modelin içinde yapılır.
+    train_ds = tf.keras.utils.image_dataset_from_directory(
+        TRAIN_DIR, validation_split=0.2, subset="training",
+        shuffle=True, **common
+    ).prefetch(AUTOTUNE)
 
-    test_gen = test_datagen.flow_from_directory(
-        test_dir,
-        target_size=IMG_SIZE,
-        batch_size=batch_size,
-        class_mode="binary",
-        shuffle=False
-    )
+    val_ds = tf.keras.utils.image_dataset_from_directory(
+        TRAIN_DIR, validation_split=0.2, subset="validation",
+        shuffle=False, **common
+    ).prefetch(AUTOTUNE)
 
-    result = (train_gen, val_gen, test_gen)
-    _gen_cache[key] = result
+    test_ds = tf.keras.utils.image_dataset_from_directory(
+        TEST_DIR, shuffle=False, **common
+    ).prefetch(AUTOTUNE)
+
+    result = (train_ds, val_ds, test_ds)
+    _gen_cache[batch_size] = result
     return result
 
 
 # =========================================================
-# 3. CNN MODEL (BatchNorm ile)
+# 3. G-HS CNN MODELİ (Önerilen – G-HS tarafından optimize edilir)
 # =========================================================
-def build_cnn_model(hp: HyperParams):
-    """CNN modelini oluştur"""
-    
-    model = Sequential([
-        Conv2D(
-            hp.filters,
-            (hp.kernel_size, hp.kernel_size),
-            activation='relu',
-            input_shape=(128, 128, 3),
-            padding='same'
-        ),
-        BatchNormalization(),
-        MaxPooling2D(2, 2),
+def build_cnn_model(hp: HyperParams) -> tf.keras.Model:
+    """
+    Dinamik derinlikte CNN modeli.
+    G-HS, filters/kernel_size/num_blocks/dropout/lr/batch/dense parametrelerini optimize eder.
 
-        Conv2D(
-            hp.filters * 2,
-            (hp.kernel_size, hp.kernel_size),
-            activation='relu',
-            padding='same'
-        ),
-        BatchNormalization(),
-        MaxPooling2D(2, 2),
+    Mimari:
+      Rescaling → Augmentation → [Conv→BN→ReLU → Conv→BN→ReLU → MaxPool] × num_blocks
+      → GlobalAveragePooling → Dense(dense_units) → Dropout → Dense(1, sigmoid)
 
-        Flatten(),
-        Dropout(hp.dropout),
+    GlobalAveragePooling2D, Flatten'a göre overfitting'e daha dayanıklıdır ve
+    parametre sayısını büyük ölçüde azaltır.
+    """
+    inputs = tf.keras.Input(shape=(IMG_SIZE[0], IMG_SIZE[1], 3))
 
-        Dense(128, activation='relu'),
-        Dense(1, activation='sigmoid')
-    ])
+    # Normalizasyon ve veri artırma (eğitimde aktif, evaluate/predict'te pasif)
+    x = tf.keras.layers.Rescaling(1.0 / 255)(inputs)
+    x = tf.keras.layers.RandomFlip("horizontal")(x)
+    x = tf.keras.layers.RandomRotation(0.15)(x)
+    x = tf.keras.layers.RandomZoom(0.15)(x)
+    x = tf.keras.layers.RandomContrast(0.1)(x)
 
+    # Konvolüsyon blokları: her blokta filtre sayısı 2 katına çıkar
+    f = hp.filters
+    for _ in range(hp.num_blocks):
+        x = tf.keras.layers.Conv2D(f, (hp.kernel_size, hp.kernel_size),
+                                   padding='same')(x)
+        x = tf.keras.layers.BatchNormalization()(x)
+        x = tf.keras.layers.Activation('relu')(x)
+        x = tf.keras.layers.Conv2D(f, (hp.kernel_size, hp.kernel_size),
+                                   padding='same')(x)
+        x = tf.keras.layers.BatchNormalization()(x)
+        x = tf.keras.layers.Activation('relu')(x)
+        x = tf.keras.layers.MaxPooling2D(2, 2)(x)
+        x = tf.keras.layers.Dropout(hp.dropout * 0.5)(x)
+        f = min(f * 2, MAX_FILTERS)   # Modül düzeyinde sabit ile sınırla
+
+    # Sınıflandırıcı kafası
+    x = tf.keras.layers.GlobalAveragePooling2D()(x)
+    x = tf.keras.layers.Dense(hp.dense_units, activation='relu')(x)
+    x = tf.keras.layers.Dropout(hp.dropout)(x)
+    # Mixed precision ile uyumluluk için çıktı katmanı float32
+    outputs = tf.keras.layers.Dense(1, activation='sigmoid', dtype='float32')(x)
+
+    model = tf.keras.Model(inputs, outputs)
     model.compile(
-        optimizer=Adam(learning_rate=hp.learning_rate),
+        optimizer=tf.keras.optimizers.Adam(learning_rate=hp.learning_rate),
         loss='binary_crossentropy',
         metrics=['accuracy']
     )
-
     return model
 
 
 # =========================================================
-# 4. FITNESS (HIZLANDI)
+# 4. KLASİK CNN MODELİ (Baseline – sabit hiperparametreler)
 # =========================================================
-def evaluate_fitness(hp: HyperParams, epochs=3):
-    """Fitness hesapla (hızlı versiyon)"""
-    
+def build_cnn_baseline() -> tf.keras.Model:
+    """
+    Standart sabit-parametreli CNN baseline.
+    G-HS-CNN ile karşılaştırma için referans noktası.
+    Mimari: 3 conv blok (32→64→128 filtre), Flatten + Dense.
+    """
+    model = tf.keras.Sequential([
+        tf.keras.layers.Rescaling(1.0 / 255, input_shape=(IMG_SIZE[0], IMG_SIZE[1], 3)),
+        tf.keras.layers.RandomFlip("horizontal"),
+        tf.keras.layers.RandomRotation(0.1),
+        tf.keras.layers.RandomZoom(0.1),
+        # Blok 1
+        tf.keras.layers.Conv2D(32, (3, 3), activation='relu', padding='same'),
+        tf.keras.layers.BatchNormalization(),
+        tf.keras.layers.MaxPooling2D(2, 2),
+        # Blok 2
+        tf.keras.layers.Conv2D(64, (3, 3), activation='relu', padding='same'),
+        tf.keras.layers.BatchNormalization(),
+        tf.keras.layers.MaxPooling2D(2, 2),
+        # Blok 3
+        tf.keras.layers.Conv2D(128, (3, 3), activation='relu', padding='same'),
+        tf.keras.layers.BatchNormalization(),
+        tf.keras.layers.MaxPooling2D(2, 2),
+        # Sınıflandırıcı
+        tf.keras.layers.Flatten(),
+        tf.keras.layers.Dropout(0.4),
+        tf.keras.layers.Dense(256, activation='relu'),
+        tf.keras.layers.Dropout(0.2),
+        tf.keras.layers.Dense(1, activation='sigmoid', dtype='float32'),
+    ])
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+        loss='binary_crossentropy',
+        metrics=['accuracy']
+    )
+    return model
+
+
+# =========================================================
+# 5. FITNESS FONKSİYONU
+# =========================================================
+def evaluate_fitness(hp: HyperParams, epochs: int = 3) -> float:
+    """
+    CNN modeli için fitness hesapla (G-HS optimizasyon döngüsünde kullanılır).
+    Düşük val_loss → daha iyi hiperparametre seti.
+    """
     try:
         tf.keras.backend.clear_session()
 
-        train_gen, val_gen, _ = create_generators(hp.batch_size)
-
+        train_ds, val_ds, _ = create_datasets(hp.batch_size)
         model = build_cnn_model(hp)
 
-        # Agresif early stopping
         es = EarlyStopping(
             monitor="val_loss",
             patience=1,
@@ -197,8 +239,8 @@ def evaluate_fitness(hp: HyperParams, epochs=3):
         )
 
         history = model.fit(
-            train_gen,
-            validation_data=val_gen,
+            train_ds,
+            validation_data=val_ds,
             epochs=epochs,
             verbose=0,
             callbacks=[es]
@@ -210,22 +252,37 @@ def evaluate_fitness(hp: HyperParams, epochs=3):
         gc.collect()
 
         return val_loss
-        
+
     except Exception as e:
         print(f"❌ Fitness hatası: {e}")
+        import traceback
+        traceback.print_exc()
         return float('inf')
 
 
 # =========================================================
-# 5. PARAMETRE SINIRLARI
+# 6. PARAMETRE SINIRLARI
 # =========================================================
 BOUNDS = {
-    "filters": (16, 128),
-    "kernel_size": (2, 5),
-    "dropout": (0.1, 0.5),
-    "learning_rate": (0.0001, 0.01),
-    "batch_size": (16, 64)
+    "filters":       (16,    128),
+    "kernel_size":   (2,     5),
+    "num_blocks":    (2,     4),
+    "dropout":       (0.1,   0.5),
+    "learning_rate": (1e-4,  1e-2),
+    "batch_size":    (16,    64),
+    "dense_units":   (64,    512),
 }
+
+CHOICES = {
+    "filters":     [16, 32, 64, 128],
+    "kernel_size": [2, 3, 5],
+    "num_blocks":  [2, 3, 4],
+    "batch_size":  [16, 32, 64],
+    "dense_units": [64, 128, 256, 512],
+}
+
+CONTINUOUS_PARAMS = {"dropout", "learning_rate"}
+DISCRETE_PARAMS   = {"filters", "kernel_size", "num_blocks", "batch_size", "dense_units"}
 
 
 def get_nearest_choice(val, choices):
@@ -236,16 +293,18 @@ def get_nearest_choice(val, choices):
 def random_hyperparams():
     """Rastgele hiperparametreler üret"""
     return HyperParams(
-        filters=random.choice([16, 32, 64, 128]),
-        kernel_size=random.choice([2, 3, 5]),
-        dropout=random.uniform(*BOUNDS["dropout"]),
-        learning_rate=random.uniform(*BOUNDS["learning_rate"]),
-        batch_size=random.choice([16, 32, 64])
+        filters=random.choice(CHOICES["filters"]),
+        kernel_size=random.choice(CHOICES["kernel_size"]),
+        num_blocks=random.choice(CHOICES["num_blocks"]),
+        dropout=round(random.uniform(0.1, 0.5), 4),
+        learning_rate=10 ** random.uniform(-4, -2),  # log-scale: 0.0001 – 0.01
+        batch_size=random.choice(CHOICES["batch_size"]),
+        dense_units=random.choice(CHOICES["dense_units"]),
     )
 
 
 # =========================================================
-# 6. G-HS ALGORİTMASI (ORIJINAL + OBL)
+# 7. G-HS ALGORİTMASI (OBL + DİNAMİK PAR/BW)
 # =========================================================
 def ghs_optimize(
     HMS=10,
@@ -257,8 +316,8 @@ def ghs_optimize(
     BW_max=0.1,
     epochs_optimize=3
 ):
-    """G-HS Optimizasyonu"""
-    
+    """G-HS ile CNN hiperparametrelerini optimize et"""
+
     HM = []
     convergence = []
 
@@ -270,13 +329,14 @@ def ghs_optimize(
     for i in range(HMS):
         hp = random_hyperparams()
         fitness = evaluate_fitness(hp, epochs=epochs_optimize)
-
-        HM.append({
-            "hp": hp,
-            "fitness": fitness
-        })
-
-        print(f"✓ Init {i+1}/{HMS}: Loss={fitness:.6f}")
+        HM.append({"hp": hp, "fitness": fitness})
+        print(
+            f"✓ Init {i+1}/{HMS}: "
+            f"filters={hp.filters}, k={hp.kernel_size}, blocks={hp.num_blocks}, "
+            f"dropout={hp.dropout:.3f}, lr={hp.learning_rate:.2e}, "
+            f"batch={hp.batch_size}, dense={hp.dense_units} "
+            f"→ Loss={fitness:.6f}"
+        )
 
     HM = sorted(HM, key=lambda x: x["fitness"])
     best_init = HM[0]["fitness"]
@@ -285,200 +345,188 @@ def ghs_optimize(
     print(">>> OPTİMİZASYON BAŞLADI")
     print("=" * 70 + "\n")
 
-    # 2. İterasyon
+    # 2. İterasyon döngüsü
     for t in range(1, NI + 1):
 
         PAR_t = PAR_min + ((PAR_max - PAR_min) / NI) * t
-        BW_t = BW_max * np.exp(np.log(BW_min / BW_max) * (t / NI))
+        BW_t  = BW_max * np.exp(np.log(BW_min / BW_max) * (t / NI))
 
         new_params = {}
 
-        for param in ["filters", "kernel_size", "dropout", "learning_rate", "batch_size"]:
+        for param in ["filters", "kernel_size", "num_blocks",
+                      "dropout", "learning_rate", "batch_size", "dense_units"]:
 
+            low, high = BOUNDS[param]
             rand1 = random.random()
 
-            # HMCR Şartı Sağlandığında (Hafızadan Seçim)
+            # HMCR: Hafızadan seçim
             if rand1 <= HMCR:
-                chosen = random.choice(HM)["hp"]
-                value = getattr(chosen, param)
-                rand2 = random.random()
+                value = getattr(random.choice(HM)["hp"], param)
 
-                # PAR Şartı Sağlandığında (Dinamik İnce Ayar)
-                if rand2 <= PAR_t:
-                    low, high = BOUNDS[param]
+                # PAR: Dinamik ince ayar
+                if random.random() <= PAR_t:
                     r = random.uniform(-1, 1)
-                    value = value + r * BW_t * (high - low)
-                    value = max(low, min(high, value))
+                    value = float(max(low, min(high, value + r * BW_t * (high - low))))
 
-                # Kategorik değerleri geçerli sınırlara çek
-                if param == "filters":
-                    value = get_nearest_choice(value, [16, 32, 64, 128])
-                elif param == "kernel_size":
-                    value = get_nearest_choice(value, [2, 3, 5])
-                elif param == "batch_size":
-                    value = get_nearest_choice(value, [16, 32, 64])
+                if param in DISCRETE_PARAMS:
+                    value = get_nearest_choice(value, CHOICES[param])
 
-            # OBL (Opposition-Based Learning)
+            # OBL: Opposition-Based Learning
             else:
-                # 1. Random değer üret
-                if param == "filters":
-                    val_rand = random.choice([16, 32, 64, 128])
-                elif param == "kernel_size":
-                    val_rand = random.choice([2, 3, 5])
-                elif param == "batch_size":
-                    val_rand = random.choice([16, 32, 64])
+                if param in DISCRETE_PARAMS:
+                    val_rand = random.choice(CHOICES[param])
+                    val_obl  = get_nearest_choice(low + high - val_rand, CHOICES[param])
                 else:
-                    val_rand = random.uniform(*BOUNDS[param])
+                    val_rand = random.uniform(low, high)
+                    val_obl  = float(max(low, min(high, low + high - val_rand)))
 
-                # 2. Zıt değeri hesapla
-                low, high = BOUNDS[param]
-                val_obl_raw = low + high - val_rand
+                base = asdict(HM[0]["hp"])
 
-                # 3. Zıt değeri geçerli formata yuvarla
-                if param == "filters":
-                    val_obl = get_nearest_choice(val_obl_raw, [16, 32, 64, 128])
-                elif param == "kernel_size":
-                    val_obl = get_nearest_choice(val_obl_raw, [2, 3, 5])
-                elif param == "batch_size":
-                    val_obl = get_nearest_choice(val_obl_raw, [16, 32, 64])
-                else:
-                    val_obl = float(max(low, min(high, val_obl_raw)))
+                def make_hp(override_val, _base=base, _param=param):
+                    p = {**_base, _param: override_val}
+                    return HyperParams(**{
+                        k: (float(v) if k in CONTINUOUS_PARAMS else int(v))
+                        for k, v in p.items()
+                    })
 
-                # 4. İkisini test et
-                temp_params_rand = asdict(HM[0]["hp"])
-                temp_params_rand[param] = val_rand
-                hp_rand = HyperParams(**temp_params_rand)
+                print(
+                    f"   [OBL - {param}] Rand({val_rand:.4g}) vs Obl({val_obl:.4g})...",
+                    end=" ", flush=True
+                )
+                fit_rand = evaluate_fitness(make_hp(val_rand), epochs=2)
+                fit_obl  = evaluate_fitness(make_hp(val_obl),  epochs=2)
 
-                temp_params_obl = asdict(HM[0]["hp"])
-                temp_params_obl[param] = val_obl
-                hp_obl = HyperParams(**temp_params_obl)
-
-                print(f"   [OBL Test - {param}] Rand({val_rand}) vs Obl({val_obl})...", end=" ")
-                
-                fit_rand = evaluate_fitness(hp_rand, epochs=2)
-                fit_obl = evaluate_fitness(hp_obl, epochs=2)
-
-                # 5. En iyi seçeni al
-                if fit_rand < fit_obl:
+                if fit_rand <= fit_obl:
                     value = val_rand
+                    # Eşitlik durumunda rastgele değer tercih edilir (basitlik için)
                     print(f"✓ Rand ({fit_rand:.4f})")
                 else:
                     value = val_obl
                     print(f"✓ Obl ({fit_obl:.4f})")
 
-            # Parametreyi ata
-            new_params[param] = float(value) if param in ["dropout", "learning_rate"] else int(value)
+            # Parametre tipini sabitle
+            new_params[param] = float(value) if param in CONTINUOUS_PARAMS else int(value)
 
         # Yeni harmoniyi değerlendir
-        new_hp = HyperParams(**new_params)
+        new_hp      = HyperParams(**new_params)
         new_fitness = evaluate_fitness(new_hp, epochs=epochs_optimize)
 
-        # En kötüyü bul ve değiştir
-        worst_idx = -1
-        if new_fitness < HM[worst_idx]["fitness"]:
-            HM[worst_idx] = {
-                "hp": new_hp,
-                "fitness": new_fitness
-            }
+        # En kötüyü değiştir
+        if new_fitness < HM[-1]["fitness"]:
+            HM[-1] = {"hp": new_hp, "fitness": new_fitness}
 
         HM = sorted(HM, key=lambda x: x["fitness"])
-
         best_now = HM[0]["fitness"]
         convergence.append(best_now)
 
         improvement = ((best_init - best_now) / best_init) * 100 if best_init > 0 else 0
-        print(f"Iter {t:02d}/{NI} | New Loss: {new_fitness:.6f} | Best: {best_now:.6f} | +{improvement:.1f}%")
+        print(f"Iter {t:02d}/{NI} | New: {new_fitness:.6f} | Best: {best_now:.6f} | +{improvement:.1f}%")
 
     return HM[0], convergence
 
 
 # =========================================================
-# 7. FINAL TEST
+# 8. FINAL EĞİTİM – G-HS CNN (Önerilen Model)
 # =========================================================
-def final_evaluate(best_hp: HyperParams, epochs=15):
-    """Optimum parametrelerle final eğitim"""
-    
-    print("\n🔧 FINAL MODEL EĞİTİLİYOR...")
-    
-    train_gen, val_gen, test_gen = create_generators(best_hp.batch_size)
+def final_evaluate_ghs_cnn(best_hp: HyperParams, epochs: int = 20):
+    """G-HS tarafından bulunan optimum hiperparametrelerle CNN final eğitimi"""
+    print("\n🔧 FINAL G-HS-CNN MODELİ EĞİTİLİYOR...")
+    train_ds, val_ds, test_ds = create_datasets(best_hp.batch_size)
 
     model = build_cnn_model(best_hp)
 
-    callbacks = [
-        EarlyStopping(monitor="val_loss", patience=3, restore_best_weights=True)
-    ]
-
     history = model.fit(
-        train_gen,
-        validation_data=val_gen,
+        train_ds, validation_data=val_ds,
         epochs=epochs,
         verbose=1,
-        callbacks=callbacks
+        callbacks=[
+            EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True),
+            ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=3, min_lr=1e-7, verbose=1),
+        ]
     )
 
-    test_loss, test_acc = model.evaluate(test_gen, verbose=0)
-
+    test_loss, test_acc = model.evaluate(test_ds, verbose=0)
     return model, test_loss, test_acc, history
 
 
 # =========================================================
-# 8. BASELINE CNN
+# 9. FINAL EĞİTİM – CNN BASELINE
 # =========================================================
-def baseline_cnn():
-    """Standart parametrelerle baseline model"""
-    
+def final_evaluate_cnn_baseline(epochs: int = 15):
+    """Sabit hiperparametreli standart CNN baseline eğitimi"""
     print("\n📈 BASELINE CNN EĞİTİLİYOR...")
-    
-    baseline_hp = HyperParams(
-        filters=32,
-        kernel_size=3,
-        dropout=0.25,
-        learning_rate=0.001,
-        batch_size=32
+    train_ds, val_ds, test_ds = create_datasets(32)
+
+    model = build_cnn_baseline()
+
+    history = model.fit(
+        train_ds, validation_data=val_ds,
+        epochs=epochs,
+        verbose=1,
+        callbacks=[
+            EarlyStopping(monitor="val_loss", patience=4, restore_best_weights=True),
+            ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=2, min_lr=1e-7, verbose=1),
+        ]
     )
 
-    return final_evaluate(baseline_hp, epochs=15)
+    test_loss, test_acc = model.evaluate(test_ds, verbose=0)
+    return model, test_loss, test_acc, history
 
 
 # =========================================================
-# 9. GRAFİK ÇIZME
+# 10. GRAFİKLER
 # =========================================================
-def plot_convergence(convergence):
-    """Yakınsama grafiğini çiz"""
-    
-    plt.figure(figsize=(12, 5))
+def plot_results(convergence, ghs_cnn_acc, baseline_acc):
+    """Yakınsama ve accuracy karşılaştırma grafiklerini çiz"""
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
-    plt.subplot(1, 2, 1)
-    plt.plot(convergence, marker='o', linewidth=2, markersize=4, color='blue')
-    plt.title("G-HS Yakınsama Eğrisi (OBL ile)", fontsize=12, fontweight='bold')
-    plt.xlabel("İterasyon", fontsize=11)
-    plt.ylabel("En İyi Validation Loss", fontsize=11)
-    plt.grid(True, alpha=0.3)
+    # G-HS Yakınsama eğrisi
+    axes[0].plot(convergence, marker='o', linewidth=2, markersize=4, color='royalblue')
+    axes[0].set_title("G-HS Yakınsama Eğrisi (OBL + Dinamik PAR/BW)", fontsize=11, fontweight='bold')
+    axes[0].set_xlabel("İterasyon")
+    axes[0].set_ylabel("En İyi Validation Loss")
+    axes[0].grid(True, alpha=0.3)
 
-    plt.subplot(1, 2, 2)
+    # İyileşme yüzdesi
     improvement = [(convergence[0] - x) / convergence[0] * 100 for x in convergence]
-    plt.bar(range(len(improvement)), improvement, color='green', alpha=0.7)
-    plt.title("İyileşme Yüzdesi", fontsize=12, fontweight='bold')
-    plt.xlabel("İterasyon", fontsize=11)
-    plt.ylabel("İyileşme (%)", fontsize=11)
-    plt.grid(True, alpha=0.3, axis='y')
+    axes[1].bar(range(len(improvement)), improvement, color='seagreen', alpha=0.75)
+    axes[1].set_title("G-HS İyileşme Yüzdesi", fontsize=11, fontweight='bold')
+    axes[1].set_xlabel("İterasyon")
+    axes[1].set_ylabel("İyileşme (%)")
+    axes[1].grid(True, alpha=0.3, axis='y')
+
+    # Test Accuracy karşılaştırması
+    labels = ['KLASİK CNN\n(Baseline)', 'G-HS-CNN\n(Önerilen)']
+    accs   = [baseline_acc * 100, ghs_cnn_acc * 100]
+    colors = ['#FF6B6B', '#4ECDC4']
+    bars   = axes[2].bar(labels, accs, color=colors, alpha=0.85, edgecolor='black', width=0.5)
+    axes[2].set_title("Test Accuracy Karşılaştırması", fontsize=11, fontweight='bold')
+    axes[2].set_ylabel("Test Accuracy (%)")
+    axes[2].set_ylim(max(0, min(accs) - 10), 102)
+    axes[2].grid(True, alpha=0.3, axis='y')
+    for bar, acc in zip(bars, accs):
+        axes[2].text(
+            bar.get_x() + bar.get_width() / 2.,
+            bar.get_height() + 0.3,
+            f'{acc:.2f}%',
+            ha='center', va='bottom', fontsize=11, fontweight='bold'
+        )
 
     plt.tight_layout()
-    plt.savefig("ghs_convergence.png", dpi=150)
+    plt.savefig("ghs_results.png", dpi=150)
     plt.close()
-    
-    print("✓ Grafik kaydedildi: ghs_convergence.png")
+    print("✓ Grafik kaydedildi: ghs_results.png")
 
 
 # =========================================================
-# 10. MAIN
+# 11. MAIN
 # =========================================================
 def run():
     set_seed(42)
 
     print("\n" + "=" * 70)
     print("🎯 G-HS + OBL + DİNAMİK PAR/BW ile CNN HİPERPARAMETRE OPTİMİZASYONU")
-    print("Dataset: Waste Classification (Organic vs Recyclable)")
+    print("Dataset: Waste Classification (Organic vs Recyclable, 22500 görüntü)")
     print("=" * 70)
 
     try:
@@ -500,68 +548,72 @@ def run():
         print("✅ OPTİMİZASYON TAMAMLANDI")
         print("=" * 70)
         print("\n📊 EN İYİ HİPERPARAMETRELER:")
-        print(f"   • Filtreler: {best_hp.filters}")
+        print(f"   • Filtreler:     {best_hp.filters}")
         print(f"   • Kernel Boyutu: {best_hp.kernel_size}")
-        print(f"   • Dropout: {best_hp.dropout:.4f}")
-        print(f"   • Öğrenme Oranı: {best_hp.learning_rate:.6f}")
-        print(f"   • Batch Size: {best_hp.batch_size}")
-        print(f"   • En İyi Validation Loss: {best_solution['fitness']:.6f}")
+        print(f"   • Blok Sayısı:   {best_hp.num_blocks}")
+        print(f"   • Dropout:       {best_hp.dropout:.4f}")
+        print(f"   • Öğrenme Oranı: {best_hp.learning_rate:.2e}")
+        print(f"   • Batch Size:    {best_hp.batch_size}")
+        print(f"   • Dense Units:   {best_hp.dense_units}")
+        print(f"   • En İyi Val Loss: {best_solution['fitness']:.6f}")
         print("=" * 70)
 
-        # Final model
-        final_model, final_loss, final_acc, _ = final_evaluate(best_hp, epochs=15)
+        # Final G-HS-CNN modeli
+        _, final_loss, final_acc, _ = final_evaluate_ghs_cnn(best_hp, epochs=20)
 
-        # Baseline model
-        _, baseline_loss, baseline_acc, _ = baseline_cnn()
+        # Baseline CNN
+        _, baseline_loss, baseline_acc, _ = final_evaluate_cnn_baseline(epochs=15)
 
         # Grafik
-        plot_convergence(convergence)
+        plot_results(convergence, final_acc, baseline_acc)
 
-        # Sonuçlar
+        # Metrikler
+        loss_improvement = ((baseline_loss - final_loss) / baseline_loss) * 100
+        acc_improvement  = ((final_acc - baseline_acc) / baseline_acc) * 100
+
         print("\n" + "=" * 70)
         print("📈 TEST SONUÇLARI")
         print("=" * 70)
 
-        print("\n🎯 ÖNERİLEN G-HS + CNN")
+        print("\n🎯 G-HS-CNN (Önerilen – Optimize Edilmiş)")
         print(f"   Test Loss:     {final_loss:.6f}")
-        print(f"   Test Accuracy: {final_acc:.6f}")
+        print(f"   Test Accuracy: {final_acc:.4f}  ({final_acc * 100:.2f}%)")
 
-        print("\n📊 KLASİK CNN (Baseline)")
+        print("\n📊 KLASİK CNN (Baseline – Sabit Parametreler)")
         print(f"   Test Loss:     {baseline_loss:.6f}")
-        print(f"   Test Accuracy: {baseline_acc:.6f}")
-
-        # İyileşme hesapla
-        loss_improvement = ((baseline_loss - final_loss) / baseline_loss) * 100
-        acc_improvement = ((final_acc - baseline_acc) / baseline_acc) * 100
+        print(f"   Test Accuracy: {baseline_acc:.4f}  ({baseline_acc * 100:.2f}%)")
 
         print("\n🚀 İYİLEŞTİRME")
-        print(f"   Loss Azalması:     {loss_improvement:+.2f}%")
-        print(f"   Accuracy Artışı:   {acc_improvement:+.2f}%")
+        print(f"   Loss Azalması:   {loss_improvement:+.2f}%")
+        print(f"   Accuracy Artışı: {acc_improvement:+.2f}%")
         print("=" * 70)
 
-        # JSON'a kaydet
+        # JSON kaydet
         summary = {
             "optimization_type": "G-HS + OBL + Dynamic PAR/BW",
-            "dataset": "Waste Classification",
+            "proposed_model":    "G-HS Optimized CNN",
+            "dataset":           "Waste Classification (22500 images, 128x128)",
             "best_hyperparameters": {
-                "filters": best_hp.filters,
-                "kernel_size": best_hp.kernel_size,
-                "dropout": float(best_hp.dropout),
+                "filters":       best_hp.filters,
+                "kernel_size":   best_hp.kernel_size,
+                "num_blocks":    best_hp.num_blocks,
+                "dropout":       float(best_hp.dropout),
                 "learning_rate": float(best_hp.learning_rate),
-                "batch_size": best_hp.batch_size
+                "batch_size":    best_hp.batch_size,
+                "dense_units":   best_hp.dense_units,
             },
-            "ghs_results": {
-                "test_loss": float(final_loss),
-                "test_accuracy": float(final_acc),
-                "validation_loss_at_optimization": float(best_solution["fitness"])
+            "ghs_cnn_results": {
+                "test_loss":             float(final_loss),
+                "test_accuracy":         float(final_acc),
+                "optimization_val_loss": float(best_solution["fitness"])
             },
-            "baseline_results": {
-                "test_loss": float(baseline_loss),
+            "baseline_cnn_results": {
+                "test_loss":     float(baseline_loss),
                 "test_accuracy": float(baseline_acc)
             },
             "improvements": {
-                "loss_reduction_percent": float(loss_improvement),
-                "accuracy_gain_percent": float(acc_improvement)
+                "loss_reduction_pct":  float(loss_improvement),
+                "accuracy_gain_pct":   float(acc_improvement)
             },
             "convergence_history": [float(x) for x in convergence]
         }
@@ -570,7 +622,7 @@ def run():
             json.dump(summary, f, indent=4, ensure_ascii=False)
 
         print("\n✓ Dosyalar kaydedildi:")
-        print("  • ghs_convergence.png")
+        print("  • ghs_results.png")
         print("  • summary.json")
 
     except Exception as e:
@@ -580,7 +632,7 @@ def run():
 
 
 # =========================================================
-# 11. ÇALIŞTIR
+# 12. ÇALIŞTIR
 # =========================================================
 if __name__ == "__main__":
     run()
