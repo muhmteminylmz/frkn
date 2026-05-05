@@ -97,12 +97,13 @@ TRAIN_SUBSET = 2000   # QUICK_TEST=True iken kullanılacak eğitim örnek sayıs
 VAL_SUBSET   = 500    # QUICK_TEST=True iken kullanılacak doğrulama örnek sayısı
 
 
-def create_datasets(batch_size):
-    """tf.data pipeline ile veri yükle (batch_size başına cache'li)"""
-    if batch_size in _gen_cache:
-        return _gen_cache[batch_size]
+def create_datasets(batch_size, use_subset=QUICK_TEST):
+    """tf.data pipeline ile veri yükle (batch_size ve use_subset başına cache'li)"""
+    cache_key = (batch_size, use_subset)
+    if cache_key in _gen_cache:
+        return _gen_cache[cache_key]
 
-    print(f"📦 Dataset pipeline hazırlanıyor (Batch={batch_size})...")
+    print(f"📦 Dataset pipeline hazırlanıyor (Batch={batch_size}, use_subset={use_subset})...")
 
     common = dict(
         image_size=IMG_SIZE,
@@ -120,24 +121,24 @@ def create_datasets(batch_size):
 
     val_ds = tf.keras.utils.image_dataset_from_directory(
         TRAIN_DIR, validation_split=0.2, subset="validation",
-        shuffle=False, **common
+        shuffle=True, **common
     )
 
     test_ds = tf.keras.utils.image_dataset_from_directory(
         TEST_DIR, shuffle=False, **common
     )
 
-    # Hızlı test modunda veri alt kümesi kullan
-    if QUICK_TEST:
-        train_ds = train_ds.unbatch().take(TRAIN_SUBSET).batch(batch_size)
-        val_ds   = val_ds.unbatch().take(VAL_SUBSET).batch(batch_size)
+    # Alt küme modunda dengeli sınıf dağılımı için önce karıştır, sonra kırp
+    if use_subset:
+        train_ds = train_ds.unbatch().shuffle(2000).take(TRAIN_SUBSET).batch(batch_size)
+        val_ds   = val_ds.unbatch().shuffle(500).take(VAL_SUBSET).batch(batch_size)
 
     train_ds = train_ds.prefetch(AUTOTUNE)
     val_ds   = val_ds.prefetch(AUTOTUNE)
     test_ds  = test_ds.prefetch(AUTOTUNE)
 
     result = (train_ds, val_ds, test_ds)
-    _gen_cache[batch_size] = result
+    _gen_cache[cache_key] = result
     return result
 
 
@@ -248,7 +249,7 @@ def evaluate_fitness(hp: HyperParams, epochs: int = 3) -> float:
     try:
         tf.keras.backend.clear_session()
 
-        train_ds, val_ds, _ = create_datasets(hp.batch_size)
+        train_ds, val_ds, _ = create_datasets(hp.batch_size, use_subset=True)
         model = build_cnn_model(hp)
 
         es = EarlyStopping(
@@ -451,7 +452,7 @@ def ghs_optimize(
 def final_evaluate_ghs_cnn(best_hp: HyperParams, epochs: int = 20):
     """G-HS tarafından bulunan optimum hiperparametrelerle CNN final eğitimi"""
     print("\n🔧 FINAL G-HS-CNN MODELİ EĞİTİLİYOR...")
-    train_ds, val_ds, test_ds = create_datasets(best_hp.batch_size)
+    train_ds, val_ds, test_ds = create_datasets(32, use_subset=False)
 
     model = build_cnn_model(best_hp)
 
@@ -475,7 +476,7 @@ def final_evaluate_ghs_cnn(best_hp: HyperParams, epochs: int = 20):
 def final_evaluate_cnn_baseline(epochs: int = 15):
     """Sabit hiperparametreli standart CNN baseline eğitimi"""
     print("\n📈 BASELINE CNN EĞİTİLİYOR...")
-    train_ds, val_ds, test_ds = create_datasets(32)
+    train_ds, val_ds, test_ds = create_datasets(32, use_subset=False)
 
     model = build_cnn_baseline()
 
