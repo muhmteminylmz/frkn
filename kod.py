@@ -21,6 +21,13 @@ warnings.filterwarnings("ignore")
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 # =========================================================
+# HIZLI TEST MODU
+# QUICK_TEST = True  → küçük veri alt kümesi (hızlı doğrulama)
+# QUICK_TEST = False → tüm 22k veri (tam çalıştırma)
+# =========================================================
+QUICK_TEST = True
+
+# =========================================================
 # GPU SETUP
 # =========================================================
 os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
@@ -76,7 +83,6 @@ class HyperParams:
 # 2. VERİ YÜKLEME (tf.data Pipeline – HIZLI)
 # =========================================================
 # tf.data + AUTOTUNE prefetch: ImageDataGenerator'a göre ~2x daha hızlı
-IMG_SIZE = (128, 128)
 TRAIN_DIR = "dataset/train"
 TEST_DIR  = "dataset/test"
 AUTOTUNE     = tf.data.AUTOTUNE
@@ -84,6 +90,11 @@ MAX_FILTERS  = 512  # Her blokta 2x artan filtre sayısı için üst sınır
 
 # Dataset cache (batch_size → (train_ds, val_ds, test_ds))
 _gen_cache = {}
+
+# Hızlı test modu ayarları
+IMG_SIZE = (64, 64) if QUICK_TEST else (128, 128)
+TRAIN_SUBSET = 2000   # QUICK_TEST=True iken kullanılacak eğitim örnek sayısı
+VAL_SUBSET   = 500    # QUICK_TEST=True iken kullanılacak doğrulama örnek sayısı
 
 
 def create_datasets(batch_size):
@@ -105,16 +116,25 @@ def create_datasets(batch_size):
     train_ds = tf.keras.utils.image_dataset_from_directory(
         TRAIN_DIR, validation_split=0.2, subset="training",
         shuffle=True, **common
-    ).prefetch(AUTOTUNE)
+    )
 
     val_ds = tf.keras.utils.image_dataset_from_directory(
         TRAIN_DIR, validation_split=0.2, subset="validation",
         shuffle=False, **common
-    ).prefetch(AUTOTUNE)
+    )
 
     test_ds = tf.keras.utils.image_dataset_from_directory(
         TEST_DIR, shuffle=False, **common
-    ).prefetch(AUTOTUNE)
+    )
+
+    # Hızlı test modunda veri alt kümesi kullan
+    if QUICK_TEST:
+        train_ds = train_ds.unbatch().take(TRAIN_SUBSET).batch(batch_size)
+        val_ds   = val_ds.unbatch().take(VAL_SUBSET).batch(batch_size)
+
+    train_ds = train_ds.prefetch(AUTOTUNE)
+    val_ds   = val_ds.prefetch(AUTOTUNE)
+    test_ds  = test_ds.prefetch(AUTOTUNE)
 
     result = (train_ds, val_ds, test_ds)
     _gen_cache[batch_size] = result
@@ -527,19 +547,27 @@ def run():
     print("\n" + "=" * 70)
     print("🎯 G-HS + OBL + DİNAMİK PAR/BW ile CNN HİPERPARAMETRE OPTİMİZASYONU")
     print("Dataset: Waste Classification (Organic vs Recyclable, 22500 görüntü)")
+    if QUICK_TEST:
+        print(f"⚡ HIZLI TEST MODU: IMG={IMG_SIZE}, Eğitim={TRAIN_SUBSET}, Val={VAL_SUBSET} örnek")
     print("=" * 70)
+
+    # G-HS parametreleri: hızlı test ↔ tam çalıştırma
+    if QUICK_TEST:
+        HMS, NI, epochs_opt, epochs_final, epochs_base = 5, 10, 2, 10, 8
+    else:
+        HMS, NI, epochs_opt, epochs_final, epochs_base = 10, 30, 3, 20, 15
 
     try:
         # G-HS Optimizasyonu
         best_solution, convergence = ghs_optimize(
-            HMS=10,
-            NI=30,
+            HMS=HMS,
+            NI=NI,
             HMCR=0.85,
             PAR_min=0.30,
             PAR_max=0.90,
             BW_min=0.001,
             BW_max=0.1,
-            epochs_optimize=3
+            epochs_optimize=epochs_opt
         )
 
         best_hp = best_solution["hp"]
@@ -559,10 +587,10 @@ def run():
         print("=" * 70)
 
         # Final G-HS-CNN modeli
-        _, final_loss, final_acc, _ = final_evaluate_ghs_cnn(best_hp, epochs=20)
+        _, final_loss, final_acc, _ = final_evaluate_ghs_cnn(best_hp, epochs=epochs_final)
 
         # Baseline CNN
-        _, baseline_loss, baseline_acc, _ = final_evaluate_cnn_baseline(epochs=15)
+        _, baseline_loss, baseline_acc, _ = final_evaluate_cnn_baseline(epochs=epochs_base)
 
         # Grafik
         plot_results(convergence, final_acc, baseline_acc)
@@ -592,7 +620,11 @@ def run():
         summary = {
             "optimization_type": "G-HS + OBL + Dynamic PAR/BW",
             "proposed_model":    "G-HS Optimized CNN",
-            "dataset":           "Waste Classification (22500 images, 128x128)",
+            "dataset": (
+                f"Waste Classification (QUICK_TEST: {TRAIN_SUBSET} train, {VAL_SUBSET} val, {IMG_SIZE[0]}x{IMG_SIZE[1]})"
+                if QUICK_TEST
+                else "Waste Classification (22500 images, 128x128)"
+            ),
             "best_hyperparameters": {
                 "filters":       best_hp.filters,
                 "kernel_size":   best_hp.kernel_size,
