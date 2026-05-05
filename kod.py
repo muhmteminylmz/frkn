@@ -59,9 +59,10 @@ if gpus:
 
     # ⚡ Mixed Precision: CUDA tabanlı GPU'larda ~2x hız (Compute Capability ≥ 7.0)
     # DirectML (Windows) mixed_float16'yı desteklemiyor; bu durumda float32 kullanılır.
-    _is_directml = any("DML" in gpu.name.upper() or "PLUGGABLE" in gpu.name.upper()
-                       for gpu in tf.config.get_visible_devices('GPU'))
-    if _is_directml:
+    # DirectML cihazları TF içinde "DML" veya "PluggableDevice" adıyla raporlanır.
+    is_directml = any("DML" in gpu.name.upper() or "PLUGGABLE" in gpu.name.upper()
+                      for gpu in tf.config.get_visible_devices('GPU'))
+    if is_directml:
         print("ℹ️  DirectML cihazı algılandı – Mixed Precision atlandı, float32 kullanılıyor")
     else:
         try:
