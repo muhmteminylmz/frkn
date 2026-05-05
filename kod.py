@@ -32,22 +32,43 @@ QUICK_TEST = True
 # =========================================================
 os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
 
+# YEREL GTX 1650 AYARI: Sadece GPU:0 (NVIDIA) kullan, entegre GPU'yu yoksay
+# Collab'da bu ayar tüm GPU'ları kullanmaya devam eder.
+PREFERRED_GPU_INDEX = 0   # 0 = birincil GPU (GTX 1650)
+
 gpus = tf.config.list_physical_devices('GPU')
 if gpus:
     print(f"\n✅ GPU AKTIF: {len(gpus)} cihaz bulundu")
     for gpu in gpus:
         print(f"   → {gpu}")
+
+    # Birden fazla GPU varsa yalnızca PREFERRED_GPU_INDEX'i seç
+    # (GTX 1650 = GPU:0, AMD Radeon entegre = GPU:1)
+    if len(gpus) > 1:
+        try:
+            tf.config.set_visible_devices(gpus[PREFERRED_GPU_INDEX], 'GPU')
+            print(f"🎯 Yalnızca GPU:{PREFERRED_GPU_INDEX} ({gpus[PREFERRED_GPU_INDEX].name}) kullanılacak")
+        except RuntimeError as e:
+            print(f"GPU seçim hatası: {e}")
+
     try:
-        for gpu in gpus:
+        for gpu in tf.config.get_visible_devices('GPU'):
             tf.config.experimental.set_memory_growth(gpu, True)
     except RuntimeError as e:
         print(f"GPU Hatası: {e}")
-    # ⚡ Mixed Precision: uyumlu GPU'larda ~2x hız artışı (Compute Capability ≥ 7.0)
-    try:
-        tf.keras.mixed_precision.set_global_policy('mixed_float16')
-        print("⚡ Mixed Precision (float16) AKTİF")
-    except Exception as mp_err:
-        print(f"⚠️ Mixed Precision etkinleştirilemedi, float32 kullanılıyor: {mp_err}")
+
+    # ⚡ Mixed Precision: CUDA tabanlı GPU'larda ~2x hız (Compute Capability ≥ 7.0)
+    # DirectML (Windows) mixed_float16'yı desteklemiyor; bu durumda float32 kullanılır.
+    _is_directml = any("DML" in gpu.name.upper() or "PLUGGABLE" in gpu.name.upper()
+                       for gpu in tf.config.get_visible_devices('GPU'))
+    if _is_directml:
+        print("ℹ️  DirectML cihazı algılandı – Mixed Precision atlandı, float32 kullanılıyor")
+    else:
+        try:
+            tf.keras.mixed_precision.set_global_policy('mixed_float16')
+            print("⚡ Mixed Precision (float16) AKTİF")
+        except Exception as mp_err:
+            print(f"⚠️ Mixed Precision etkinleştirilemedi, float32 kullanılıyor: {mp_err}")
 else:
     print("\n⚠️ GPU bulunamadı, CPU ile devam edilecek")
 
@@ -283,23 +304,25 @@ def evaluate_fitness(hp: HyperParams, epochs: int = 3) -> float:
 
 # =========================================================
 # 6. PARAMETRE SINIRLARI
+# GTX 1650 (4 GB VRAM) için filtre ve batch üst sınırları düşürüldü.
+# Collab'da daha geniş arama alanı istenirse üst değerleri yükseltebilirsiniz.
 # =========================================================
 BOUNDS = {
-    "filters":       (16,    128),
+    "filters":       (16,    64),   # GTX 1650: 128 filtre OOM riskini artırır
     "kernel_size":   (2,     5),
     "num_blocks":    (2,     4),
     "dropout":       (0.1,   0.5),
     "learning_rate": (1e-4,  1e-2),
-    "batch_size":    (16,    64),
-    "dense_units":   (64,    512),
+    "batch_size":    (16,    32),   # GTX 1650 4 GB için max 32
+    "dense_units":   (64,    256),  # GTX 1650: 512 dense birim yerine 256
 }
 
 CHOICES = {
-    "filters":     [16, 32, 64, 128],
+    "filters":     [16, 32, 64],    # GTX 1650: 128 çıkarıldı
     "kernel_size": [2, 3, 5],
     "num_blocks":  [2, 3, 4],
-    "batch_size":  [16, 32, 64],
-    "dense_units": [64, 128, 256, 512],
+    "batch_size":  [16, 32],        # GTX 1650: 64 çıkarıldı
+    "dense_units": [64, 128, 256],  # GTX 1650: 512 çıkarıldı
 }
 
 CONTINUOUS_PARAMS = {"dropout", "learning_rate"}
