@@ -130,8 +130,8 @@ def create_datasets(batch_size, use_subset=QUICK_TEST):
 
     # Alt küme modunda dengeli sınıf dağılımı için önce karıştır, sonra kırp
     if use_subset:
-        train_ds = train_ds.unbatch().shuffle(2000).take(TRAIN_SUBSET).batch(batch_size)
-        val_ds   = val_ds.unbatch().shuffle(500).take(VAL_SUBSET).batch(batch_size)
+        train_ds = train_ds.unbatch().shuffle(TRAIN_SUBSET).take(TRAIN_SUBSET).batch(batch_size)
+        val_ds   = val_ds.unbatch().shuffle(VAL_SUBSET).take(VAL_SUBSET).batch(batch_size)
 
     train_ds = train_ds.prefetch(AUTOTUNE)
     val_ds   = val_ds.prefetch(AUTOTUNE)
