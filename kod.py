@@ -316,6 +316,7 @@ def evaluate_fitness(hp: HyperParams, epochs: int = 3) -> float:
     """
     try:
         tf.keras.backend.clear_session()
+        _gen_cache.clear()  # Eski oturuma ait stale pipeline referanslarını serbest bırak
 
         train_ds, val_ds, _ = create_datasets(hp.batch_size, use_subset=True)
         model = build_cnn_model(hp)
