@@ -37,6 +37,10 @@ QUICK_TEST = True
 # =========================================================
 DATASET_SIZE = None   # Örnek: 5000, 10000, None (otomatik)
 
+# DATASET_SIZE geçerlilik kontrolü
+if DATASET_SIZE is not None and not (500 <= DATASET_SIZE <= 22500):
+    raise ValueError(f"DATASET_SIZE {DATASET_SIZE} geçersiz. Geçerli aralık: 500 – 22500")
+
 # =========================================================
 # GPU SETUP
 # =========================================================
@@ -185,9 +189,9 @@ def create_datasets(batch_size, use_subset=QUICK_TEST):
 def _se_block(x, filters, ratio=8):
     """Squeeze-and-Excitation kanal dikkat bloğu.
     Her conv bloğundan sonra kanal önemini dinamik olarak ağırlıklandırır.
-    Parametreleri minimumdur (~2 × filters ağırlık) ancak katkısı büyüktür."""
+    Parametre sayısı: filters*(filters//ratio) + (filters//ratio)*filters ≈ 2*(filters²/ratio)."""
     se = tf.keras.layers.GlobalAveragePooling2D()(x)
-    se = tf.keras.layers.Dense(max(filters // ratio, 4), activation='relu')(se)
+    se = tf.keras.layers.Dense(max(filters // ratio, 2), activation='relu')(se)
     se = tf.keras.layers.Dense(filters, activation='sigmoid')(se)
     se = tf.keras.layers.Reshape((1, 1, filters))(se)
     return tf.keras.layers.Multiply()([x, se])
