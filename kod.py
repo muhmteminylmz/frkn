@@ -1,8 +1,8 @@
 # =========================================================
 # G-HS + OBL + DİNAMİK PAR/BW ile CNN HİPERPARAMETRE OPTİMİZASYONU
 # KAGGLE WASTE CLASSIFICATION (Organic vs Recyclable)
-# KLASİK CNN (Baseline) vs G-HS-CNN (Önerilen)
-# ✅ GPU OPTIMIZED + tf.data PIPELINE + MIXED PRECISION
+# KLASİK CNN (Baseline) vs G-HS-CNN v2 (Önerilen: SE + Residual + Label Smoothing)
+# ✅ GPU OPTIMIZED + tf.data PIPELINE + MIXED PRECISION + SEÇİLEBİLİR VERİ BOYUTU
 # =========================================================
 
 import os
@@ -26,6 +26,16 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 # QUICK_TEST = False → tüm 22k veri (tam çalıştırma)
 # =========================================================
 QUICK_TEST = True
+
+# =========================================================
+# VERİ BOYUTU (opsiyonel – DATASET_SIZE)
+# None  → QUICK_TEST/FULL moduna göre otomatik (2000 veya tüm veri)
+# int   → Tam veri setinden seçilecek toplam görüntü sayısı
+#          Örnek: DATASET_SIZE = 5000  → 4000 eğitim + 1000 doğrulama
+#          Geçerli aralık: 500 – 22500
+# Test seti her zaman ayrı TEST_DIR dizininden yüklenir (değişmez).
+# =========================================================
+DATASET_SIZE = None   # Örnek: 5000, 10000, None (otomatik)
 
 # =========================================================
 # GPU SETUP
@@ -120,8 +130,8 @@ VAL_SUBSET   = 500    # QUICK_TEST=True iken kullanılacak doğrulama örnek say
 
 
 def create_datasets(batch_size, use_subset=QUICK_TEST):
-    """tf.data pipeline ile veri yükle (batch_size ve use_subset başına cache'li)"""
-    cache_key = (batch_size, use_subset)
+    """tf.data pipeline ile veri yükle (batch_size ve veri boyutuna göre cache'li)"""
+    cache_key = (batch_size, DATASET_SIZE if DATASET_SIZE is not None else use_subset)
     if cache_key in _gen_cache:
         return _gen_cache[cache_key]
 
@@ -150,8 +160,13 @@ def create_datasets(batch_size, use_subset=QUICK_TEST):
         TEST_DIR, shuffle=False, **common
     )
 
-    # Alt küme modunda dengeli sınıf dağılımı için önce karıştır, sonra kırp
-    if use_subset:
+    # Veri alt kümesi: DATASET_SIZE önceliklidir, yoksa use_subset kontrolü yapılır
+    if DATASET_SIZE is not None:
+        train_n = int(DATASET_SIZE * 0.8)
+        val_n   = DATASET_SIZE - train_n
+        train_ds = train_ds.unbatch().shuffle(train_n * 3, seed=42).take(train_n).batch(batch_size)
+        val_ds   = val_ds.unbatch().shuffle(val_n * 3, seed=42).take(val_n).batch(batch_size)
+    elif use_subset:
         train_ds = train_ds.unbatch().shuffle(TRAIN_SUBSET).take(TRAIN_SUBSET).batch(batch_size)
         val_ds   = val_ds.unbatch().shuffle(VAL_SUBSET).take(VAL_SUBSET).batch(batch_size)
 
@@ -167,17 +182,31 @@ def create_datasets(batch_size, use_subset=QUICK_TEST):
 # =========================================================
 # 3. G-HS CNN MODELİ (Önerilen – G-HS tarafından optimize edilir)
 # =========================================================
+def _se_block(x, filters, ratio=8):
+    """Squeeze-and-Excitation kanal dikkat bloğu.
+    Her conv bloğundan sonra kanal önemini dinamik olarak ağırlıklandırır.
+    Parametreleri minimumdur (~2 × filters ağırlık) ancak katkısı büyüktür."""
+    se = tf.keras.layers.GlobalAveragePooling2D()(x)
+    se = tf.keras.layers.Dense(max(filters // ratio, 4), activation='relu')(se)
+    se = tf.keras.layers.Dense(filters, activation='sigmoid')(se)
+    se = tf.keras.layers.Reshape((1, 1, filters))(se)
+    return tf.keras.layers.Multiply()([x, se])
+
+
 def build_cnn_model(hp: HyperParams) -> tf.keras.Model:
     """
-    Dinamik derinlikte CNN modeli.
+    Dinamik derinlikte CNN modeli (v2: SE kanal dikkat + Residual bağlantı).
     G-HS, filters/kernel_size/num_blocks/dropout/lr/batch/dense parametrelerini optimize eder.
 
     Mimari:
-      Rescaling → Augmentation → [Conv→BN→ReLU → Conv→BN→ReLU → MaxPool] × num_blocks
+      Rescaling → Augmentation →
+      [Conv→BN→ReLU → Conv→BN→SE → Residual Add → ReLU → MaxPool] × num_blocks
       → GlobalAveragePooling → Dense(dense_units) → Dropout → Dense(1, sigmoid)
 
-    GlobalAveragePooling2D, Flatten'a göre overfitting'e daha dayanıklıdır ve
-    parametre sayısını büyük ölçüde azaltır.
+    Geliştirmeler (v2):
+      • SE blok: kanal dikkatini öğrenerek önemli özellikleri güçlendirir
+      • Residual bağlantı: gradyan akışını iyileştirir, derin ağlarda eğitimi kolaylaştırır
+      • Label smoothing (0.05): aşırı güven önler, genelleşmeyi artırır
     """
     inputs = tf.keras.Input(shape=(IMG_SIZE[0], IMG_SIZE[1], 3))
 
@@ -188,9 +217,11 @@ def build_cnn_model(hp: HyperParams) -> tf.keras.Model:
     x = tf.keras.layers.RandomZoom(0.15)(x)
     x = tf.keras.layers.RandomContrast(0.1)(x)
 
-    # Konvolüsyon blokları: her blokta filtre sayısı 2 katına çıkar
+    # Konvolüsyon blokları: Residual + SE dikkat – her blokta filtre sayısı 2 katına çıkar
     f = hp.filters
     for _ in range(hp.num_blocks):
+        shortcut = x
+
         x = tf.keras.layers.Conv2D(f, (hp.kernel_size, hp.kernel_size),
                                    padding='same')(x)
         x = tf.keras.layers.BatchNormalization()(x)
@@ -198,7 +229,18 @@ def build_cnn_model(hp: HyperParams) -> tf.keras.Model:
         x = tf.keras.layers.Conv2D(f, (hp.kernel_size, hp.kernel_size),
                                    padding='same')(x)
         x = tf.keras.layers.BatchNormalization()(x)
+
+        # SE kanal dikkat: hangi kanalların önemli olduğunu öğren
+        x = _se_block(x, f)
+
+        # Residual bağlantı: kanal sayısı değişmişse 1×1 projeksiyon uygula
+        if shortcut.shape[-1] != f:
+            shortcut = tf.keras.layers.Conv2D(f, 1, padding='same',
+                                              use_bias=False)(shortcut)
+            shortcut = tf.keras.layers.BatchNormalization()(shortcut)
+        x = tf.keras.layers.Add()([x, shortcut])
         x = tf.keras.layers.Activation('relu')(x)
+
         x = tf.keras.layers.MaxPooling2D(2, 2)(x)
         x = tf.keras.layers.Dropout(hp.dropout * 0.5)(x)
         f = min(f * 2, MAX_FILTERS)   # Modül düzeyinde sabit ile sınırla
@@ -213,7 +255,7 @@ def build_cnn_model(hp: HyperParams) -> tf.keras.Model:
     model = tf.keras.Model(inputs, outputs)
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=hp.learning_rate),
-        loss='binary_crossentropy',
+        loss=tf.keras.losses.BinaryCrossentropy(label_smoothing=0.05),
         metrics=['accuracy']
     )
     return model
@@ -351,6 +393,15 @@ def random_hyperparams():
 # =========================================================
 # 7. G-HS ALGORİTMASI (OBL + DİNAMİK PAR/BW)
 # =========================================================
+# Literatürden bilinen iyi başlangıç noktası – ilk harmoni olarak HM'ye eklenir.
+# Bu sayede G-HS, az HMS/NI ile bile makul bir yerden başlar.
+ELITE_SEED = HyperParams(
+    filters=32, kernel_size=3, num_blocks=3,
+    dropout=0.3, learning_rate=1e-3,
+    batch_size=32, dense_units=128,
+)
+
+
 def ghs_optimize(
     HMS=10,
     NI=30,
@@ -370,13 +421,14 @@ def ghs_optimize(
     print(">>> HM BAŞLATILIYOR (Harmony Memory Initialize)")
     print("=" * 70)
 
-    # 1. HM başlatması
+    # 1. HM başlatması (ilk harmoni: elite seed, kalanlar rastgele)
     for i in range(HMS):
-        hp = random_hyperparams()
+        hp = ELITE_SEED if i == 0 else random_hyperparams()
         fitness = evaluate_fitness(hp, epochs=epochs_optimize)
         HM.append({"hp": hp, "fitness": fitness})
+        prefix = "⭐ Elite" if i == 0 else "✓ Init  "
         print(
-            f"✓ Init {i+1}/{HMS}: "
+            f"{prefix} {i+1}/{HMS}: "
             f"filters={hp.filters}, k={hp.kernel_size}, blocks={hp.num_blocks}, "
             f"dropout={hp.dropout:.3f}, lr={hp.learning_rate:.2e}, "
             f"batch={hp.batch_size}, dense={hp.dense_units} "
@@ -570,9 +622,14 @@ def run():
     set_seed(42)
 
     print("\n" + "=" * 70)
-    print("🎯 G-HS + OBL + DİNAMİK PAR/BW ile CNN HİPERPARAMETRE OPTİMİZASYONU")
+    print("🎯 G-HS + OBL + DİNAMİK PAR/BW ile CNN HİPERPARAMETRE OPTİMİZASYONU (v2)")
     print("Dataset: Waste Classification (Organic vs Recyclable, 22500 görüntü)")
-    if QUICK_TEST:
+    if DATASET_SIZE is not None:
+        train_n = int(DATASET_SIZE * 0.8)
+        val_n   = DATASET_SIZE - train_n
+        print(f"📊 VERİ BOYUTU: {DATASET_SIZE} görüntü kullanılacak "
+              f"(Eğitim ≈ {train_n}, Doğrulama ≈ {val_n}), IMG={IMG_SIZE}")
+    elif QUICK_TEST:
         print(f"⚡ HIZLI TEST MODU: IMG={IMG_SIZE}, Eğitim={TRAIN_SUBSET}, Val={VAL_SUBSET} örnek")
     print("=" * 70)
 
@@ -646,9 +703,13 @@ def run():
             "optimization_type": "G-HS + OBL + Dynamic PAR/BW",
             "proposed_model":    "G-HS Optimized CNN",
             "dataset": (
-                f"Waste Classification (QUICK_TEST: {TRAIN_SUBSET} train, {VAL_SUBSET} val, {IMG_SIZE[0]}x{IMG_SIZE[1]})"
-                if QUICK_TEST
-                else "Waste Classification (22500 images, 128x128)"
+                f"Waste Classification ({DATASET_SIZE} images, {IMG_SIZE[0]}x{IMG_SIZE[1]})"
+                if DATASET_SIZE is not None
+                else (
+                    f"Waste Classification (QUICK_TEST: {TRAIN_SUBSET} train, {VAL_SUBSET} val, {IMG_SIZE[0]}x{IMG_SIZE[1]})"
+                    if QUICK_TEST
+                    else f"Waste Classification (22500 images, {IMG_SIZE[0]}x{IMG_SIZE[1]})"
+                )
             ),
             "best_hyperparameters": {
                 "filters":       best_hp.filters,
