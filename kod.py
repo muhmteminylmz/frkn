@@ -252,7 +252,7 @@ def build_cnn_model(hp: HyperParams) -> tf.keras.Model:
         x = tf.keras.layers.Activation('relu')(x)
 
         x = tf.keras.layers.MaxPooling2D(2, 2)(x)
-        spatial_dropout_rate = min(max(hp.dropout * 0.5, MIN_SPATIAL_DROPOUT), MAX_SPATIAL_DROPOUT)
+        spatial_dropout_rate = float(np.clip(hp.dropout * 0.5, MIN_SPATIAL_DROPOUT, MAX_SPATIAL_DROPOUT))
         x = tf.keras.layers.SpatialDropout2D(spatial_dropout_rate)(x)
         f = min(f * 2, MAX_FILTERS)   # Modül düzeyinde sabit ile sınırla
 
@@ -371,17 +371,17 @@ def evaluate_fitness(hp: HyperParams, epochs: int = 3) -> float:
 # =========================================================
 BOUNDS = {
     "filters":       (16,    64),   # GTX 1650: 128 filtre OOM riskini artırır
-    "kernel_size":   (3,     5),
+    "kernel_size":   (3,     5),    # 2 bilinçli olarak çıkarıldı
     "num_blocks":    (2,     4),
     "dropout":       (0.1,   0.5),
     "learning_rate": (1e-4,  1e-2),
-    "batch_size":    (8,     32),   # GTX 1650 4 GB için max 32
+    "batch_size":    (8,     32),   # GTX 1650 4 GB için max 32 (8 düşük-VRAM güvenli seçenek)
     "dense_units":   (64,    256),  # GTX 1650: 512 dense birim yerine 256
 }
 
 CHOICES = {
     "filters":     [16, 32, 48, 64],
-    "kernel_size": [3, 5],
+    "kernel_size": [3, 5],          # 2 bilinçli olarak arama uzayından çıkarıldı
     "num_blocks":  [2, 3, 4],
     "batch_size":  [8, 16, 32],
     "dense_units": [64, 128, 256],  # GTX 1650: 512 çıkarıldı
