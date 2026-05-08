@@ -11,14 +11,27 @@ import json
 import random
 import warnings
 import numpy as np
-import tensorflow as tf
 import matplotlib.pyplot as plt
 
 from dataclasses import dataclass, asdict
-from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 
 warnings.filterwarnings("ignore")
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+
+# TensorFlow importundan ÖNCE GPU çalışma modu seçimi:
+# FRKN_GPU_MODE: nvidia | auto | index | cpu
+# FRKN_GPU_INDEX: index modunda kullanılacak GPU indeks değeri (örn. 0)
+GPU_MODE = os.environ.get("FRKN_GPU_MODE", "nvidia").strip().lower()
+GPU_INDEX = os.environ.get("FRKN_GPU_INDEX", "0").strip()
+VALID_GPU_MODES = {"nvidia", "auto", "index", "cpu"}
+if GPU_MODE not in VALID_GPU_MODES:
+    print(f"⚠️ Geçersiz FRKN_GPU_MODE={GPU_MODE!r}. 'auto' kullanılacak.")
+    GPU_MODE = "auto"
+if GPU_MODE == "cpu":
+    os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+
+import tensorflow as tf
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 
 # =========================================================
 # HIZLI TEST MODU
@@ -46,24 +59,43 @@ if DATASET_SIZE is not None and not (500 <= DATASET_SIZE <= 22500):
 # =========================================================
 os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
 
-# YEREL GTX 1650 AYARI: Sadece GPU:0 (NVIDIA) kullan, entegre GPU'yu yoksay
-# Collab'da bu ayar tüm GPU'ları kullanmaya devam eder.
-PREFERRED_GPU_INDEX = 0   # 0 = birincil GPU (GTX 1650)
-
 gpus = tf.config.list_physical_devices('GPU')
 if gpus:
     print(f"\n✅ GPU AKTIF: {len(gpus)} cihaz bulundu")
     for gpu in gpus:
         print(f"   → {gpu}")
 
-    # Birden fazla GPU varsa yalnızca PREFERRED_GPU_INDEX'i seç
-    # (GTX 1650 = GPU:0, AMD Radeon entegre = GPU:1)
-    if len(gpus) > 1:
-        try:
-            tf.config.set_visible_devices(gpus[PREFERRED_GPU_INDEX], 'GPU')
-            print(f"🎯 Yalnızca GPU:{PREFERRED_GPU_INDEX} ({gpus[PREFERRED_GPU_INDEX].name}) kullanılacak")
-        except RuntimeError as e:
-            print(f"GPU seçim hatası: {e}")
+    try:
+        selected_gpu = None
+        fallback_reason = None
+        if GPU_MODE == "index":
+            if GPU_INDEX.isdigit():
+                gpu_index = int(GPU_INDEX)
+                if 0 <= gpu_index < len(gpus):
+                    selected_gpu = gpus[gpu_index]
+                else:
+                    fallback_reason = f"FRKN_GPU_INDEX={gpu_index} geçersiz (geçerli aralık: 0-{len(gpus)-1})"
+                    print(f"⚠️ {fallback_reason}, tüm görünür GPU'lar kullanılacak")
+            else:
+                fallback_reason = f"FRKN_GPU_INDEX={GPU_INDEX!r} sayısal değil"
+                print(f"⚠️ {fallback_reason}, tüm görünür GPU'lar kullanılacak")
+        elif GPU_MODE == "nvidia":
+            selected_gpu = next((gpu for gpu in gpus if "NVIDIA" in gpu.name.upper()), None)
+            if selected_gpu is None:
+                fallback_reason = "NVIDIA GPU bulunamadı"
+                print(f"⚠️ {fallback_reason}, tüm görünür GPU'lar kullanılacak")
+        # auto veya fallback durumunda selected_gpu None kalır ve tüm görünür GPU'lar kullanılır
+
+        if selected_gpu is not None:
+            tf.config.set_visible_devices(selected_gpu, 'GPU')
+            print(f"🎯 Seçilen GPU modu: {GPU_MODE} → {selected_gpu.name}")
+        else:
+            if fallback_reason:
+                print(f"ℹ️ Fallback modu etkin: tüm görünür GPU'lar kullanılacak")
+            else:
+                print(f"ℹ️ GPU modu: {GPU_MODE} → tüm görünür GPU'lar kullanılacak")
+    except RuntimeError as e:
+        print(f"GPU seçim hatası: {e}")
 
     try:
         for gpu in tf.config.get_visible_devices('GPU'):
