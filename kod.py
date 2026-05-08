@@ -71,8 +71,8 @@ if gpus:
     except RuntimeError as e:
         print(f"GPU Hatası: {e}")
 
-    # ⚡ Mixed Precision: CUDA tabanlı GPU'larda ~2x hız (Compute Capability ≥ 7.0)
-    # DirectML (Windows) mixed_float16'yı desteklemiyor; bu durumda float32 kullanılır.
+    # ⚡ Mixed Precision: öncelik bfloat16 (desteklenirse), aksi durumda float16.
+    # DirectML (Windows) mixed precision'ı sınırlı desteklediğinden float32 kullanılır.
     # DirectML cihazları TF içinde "DML" veya "PluggableDevice" adıyla raporlanır.
     is_directml = any("DML" in gpu.name.upper() or "PLUGGABLE" in gpu.name.upper()
                       for gpu in tf.config.get_visible_devices('GPU'))
@@ -80,10 +80,14 @@ if gpus:
         print("ℹ️  DirectML cihazı algılandı – Mixed Precision atlandı, float32 kullanılıyor")
     else:
         try:
-            tf.keras.mixed_precision.set_global_policy('mixed_float16')
-            print("⚡ Mixed Precision (float16) AKTİF")
-        except Exception as mp_err:
-            print(f"⚠️ Mixed Precision etkinleştirilemedi, float32 kullanılıyor: {mp_err}")
+            tf.keras.mixed_precision.set_global_policy('mixed_bfloat16')
+            print("⚡ Mixed Precision (bfloat16) AKTİF")
+        except Exception:
+            try:
+                tf.keras.mixed_precision.set_global_policy('mixed_float16')
+                print("⚡ Mixed Precision (float16) AKTİF (bfloat16 desteklenmedi)")
+            except Exception as mp_err:
+                print(f"⚠️ Mixed Precision etkinleştirilemedi, float32 kullanılıyor: {mp_err}")
 else:
     print("\n⚠️ GPU bulunamadı, CPU ile devam edilecek")
 
@@ -246,7 +250,7 @@ def build_cnn_model(hp: HyperParams) -> tf.keras.Model:
         x = tf.keras.layers.Activation('relu')(x)
 
         x = tf.keras.layers.MaxPooling2D(2, 2)(x)
-        x = tf.keras.layers.Dropout(hp.dropout * 0.5)(x)
+        x = tf.keras.layers.SpatialDropout2D(min(max(hp.dropout * 0.5, 0.05), 0.35))(x)
         f = min(f * 2, MAX_FILTERS)   # Modül düzeyinde sabit ile sınırla
 
     # Sınıflandırıcı kafası
@@ -321,19 +325,26 @@ def evaluate_fitness(hp: HyperParams, epochs: int = 3) -> float:
         train_ds, val_ds, _ = create_datasets(hp.batch_size, use_subset=True)
         model = build_cnn_model(hp)
 
-        es = EarlyStopping(
-            monitor="val_loss",
-            patience=1,
-            restore_best_weights=True,
-            verbose=0
-        )
-
         history = model.fit(
             train_ds,
             validation_data=val_ds,
             epochs=epochs,
             verbose=0,
-            callbacks=[es]
+            callbacks=[
+                EarlyStopping(
+                    monitor="val_loss",
+                    patience=2,
+                    restore_best_weights=True,
+                    verbose=0
+                ),
+                ReduceLROnPlateau(
+                    monitor="val_loss",
+                    factor=0.5,
+                    patience=1,
+                    min_lr=1e-6,
+                    verbose=0
+                ),
+            ]
         )
 
         val_loss = min(history.history["val_loss"])
@@ -357,19 +368,19 @@ def evaluate_fitness(hp: HyperParams, epochs: int = 3) -> float:
 # =========================================================
 BOUNDS = {
     "filters":       (16,    64),   # GTX 1650: 128 filtre OOM riskini artırır
-    "kernel_size":   (2,     5),
+    "kernel_size":   (3,     5),
     "num_blocks":    (2,     4),
     "dropout":       (0.1,   0.5),
     "learning_rate": (1e-4,  1e-2),
-    "batch_size":    (16,    32),   # GTX 1650 4 GB için max 32
+    "batch_size":    (8,     32),   # GTX 1650 4 GB için max 32
     "dense_units":   (64,    256),  # GTX 1650: 512 dense birim yerine 256
 }
 
 CHOICES = {
-    "filters":     [16, 32, 64],    # GTX 1650: 128 çıkarıldı
-    "kernel_size": [2, 3, 5],
+    "filters":     [16, 32, 48, 64],
+    "kernel_size": [3, 5],
     "num_blocks":  [2, 3, 4],
-    "batch_size":  [16, 32],        # GTX 1650: 64 çıkarıldı
+    "batch_size":  [8, 16, 32],
     "dense_units": [64, 128, 256],  # GTX 1650: 512 çıkarıldı
 }
 
@@ -533,7 +544,7 @@ def ghs_optimize(
 def final_evaluate_ghs_cnn(best_hp: HyperParams, epochs: int = 20):
     """G-HS tarafından bulunan optimum hiperparametrelerle CNN final eğitimi"""
     print("\n🔧 FINAL G-HS-CNN MODELİ EĞİTİLİYOR...")
-    train_ds, val_ds, test_ds = create_datasets(32, use_subset=False)
+    train_ds, val_ds, test_ds = create_datasets(best_hp.batch_size, use_subset=False)
 
     model = build_cnn_model(best_hp)
 
