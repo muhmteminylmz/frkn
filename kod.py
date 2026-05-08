@@ -103,8 +103,9 @@ if gpus:
     except RuntimeError as e:
         print(f"GPU Hatası: {e}")
 
-    # ⚡ Mixed Precision: öncelik bfloat16 (desteklenirse), aksi durumda float16.
-    # DirectML (Windows) mixed precision'ı sınırlı desteklediğinden float32 kullanılır.
+    # ⚡ Mixed Precision:
+    # NVIDIA GPU'larda öncelik float16 (GTX/RTX uyumu için daha güvenli),
+    # gerekirse bfloat16 denenir; DirectML'de float32 kullanılır.
     # DirectML cihazları TF içinde "DML" veya "PluggableDevice" adıyla raporlanır.
     is_directml = any("DML" in gpu.name.upper() or "PLUGGABLE" in gpu.name.upper()
                       for gpu in tf.config.get_visible_devices('GPU'))
@@ -112,14 +113,17 @@ if gpus:
         print("ℹ️  DirectML cihazı algılandı – Mixed Precision atlandı, float32 kullanılıyor")
     else:
         try:
-            tf.keras.mixed_precision.set_global_policy('mixed_bfloat16')
-            print("⚡ Mixed Precision (bfloat16) AKTİF")
-        except Exception:
+            tf.keras.mixed_precision.set_global_policy('mixed_float16')
+            print("⚡ Mixed Precision (float16) AKTİF")
+        except Exception as mp_err_fp16:
             try:
-                tf.keras.mixed_precision.set_global_policy('mixed_float16')
-                print("⚡ Mixed Precision (float16) AKTİF (bfloat16 desteklenmedi)")
-            except Exception as mp_err:
-                print(f"⚠️ Mixed Precision etkinleştirilemedi, float32 kullanılıyor: {mp_err}")
+                tf.keras.mixed_precision.set_global_policy('mixed_bfloat16')
+                print("⚡ Mixed Precision (bfloat16) AKTİF (float16 desteklenmedi)")
+            except Exception as mp_err_bf16:
+                print(
+                    "⚠️ Mixed Precision etkinleştirilemedi, float32 kullanılıyor: "
+                    f"float16={str(mp_err_fp16)} | bfloat16={str(mp_err_bf16)}"
+                )
 else:
     print("\n⚠️ GPU bulunamadı, CPU ile devam edilecek")
 
@@ -583,6 +587,9 @@ def ghs_optimize(
 def final_evaluate_ghs_cnn(best_hp: HyperParams, epochs: int = 20):
     """G-HS tarafından bulunan optimum hiperparametrelerle CNN final eğitimi"""
     print("\n🔧 FINAL G-HS-CNN MODELİ EĞİTİLİYOR...")
+    tf.keras.backend.clear_session()
+    _gen_cache.clear()
+    gc.collect()
     train_ds, val_ds, test_ds = create_datasets(best_hp.batch_size, use_subset=False)
 
     model = build_cnn_model(best_hp)
@@ -607,6 +614,9 @@ def final_evaluate_ghs_cnn(best_hp: HyperParams, epochs: int = 20):
 def final_evaluate_cnn_baseline(epochs: int = 15):
     """Sabit hiperparametreli standart CNN baseline eğitimi"""
     print("\n📈 BASELINE CNN EĞİTİLİYOR...")
+    tf.keras.backend.clear_session()
+    _gen_cache.clear()
+    gc.collect()
     train_ds, val_ds, test_ds = create_datasets(32, use_subset=False)
 
     model = build_cnn_baseline()
