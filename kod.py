@@ -23,6 +23,10 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 # FRKN_GPU_INDEX: index modunda kullanılacak GPU indeks değeri (örn. 0)
 GPU_MODE = os.environ.get("FRKN_GPU_MODE", "nvidia").strip().lower()
 GPU_INDEX = os.environ.get("FRKN_GPU_INDEX", "0").strip()
+VALID_GPU_MODES = {"nvidia", "auto", "index", "cpu"}
+if GPU_MODE not in VALID_GPU_MODES:
+    print(f"⚠️ Geçersiz FRKN_GPU_MODE={GPU_MODE!r}. 'auto' kullanılacak.")
+    GPU_MODE = "auto"
 if GPU_MODE == "cpu":
     os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
@@ -63,26 +67,34 @@ if gpus:
 
     try:
         selected_gpu = None
+        fallback_reason = None
         if GPU_MODE == "index":
-            gpu_index = int(GPU_INDEX)
-            if 0 <= gpu_index < len(gpus):
-                selected_gpu = gpus[gpu_index]
+            if GPU_INDEX.isdigit():
+                gpu_index = int(GPU_INDEX)
+                if 0 <= gpu_index < len(gpus):
+                    selected_gpu = gpus[gpu_index]
+                else:
+                    fallback_reason = f"FRKN_GPU_INDEX={gpu_index} geçersiz (geçerli aralık: 0-{len(gpus)-1})"
+                    print(f"⚠️ {fallback_reason}, tüm görünür GPU'lar kullanılacak")
             else:
-                print(f"⚠️ FRKN_GPU_INDEX={gpu_index} geçersiz, otomatik seçime dönülüyor")
+                fallback_reason = f"FRKN_GPU_INDEX={GPU_INDEX!r} sayısal değil"
+                print(f"⚠️ {fallback_reason}, tüm görünür GPU'lar kullanılacak")
         elif GPU_MODE == "nvidia":
             selected_gpu = next((gpu for gpu in gpus if "NVIDIA" in gpu.name.upper()), None)
             if selected_gpu is None:
-                print("⚠️ NVIDIA GPU bulunamadı, otomatik seçime dönülüyor")
-        elif GPU_MODE == "cpu":
-            selected_gpu = None
+                fallback_reason = "NVIDIA GPU bulunamadı"
+                print(f"⚠️ {fallback_reason}, tüm görünür GPU'lar kullanılacak")
         # auto veya fallback durumunda selected_gpu None kalır ve tüm görünür GPU'lar kullanılır
 
         if selected_gpu is not None:
             tf.config.set_visible_devices(selected_gpu, 'GPU')
             print(f"🎯 Seçilen GPU modu: {GPU_MODE} → {selected_gpu.name}")
         else:
-            print(f"ℹ️ GPU modu: {GPU_MODE} (otomatik/tüm görünür GPU)")
-    except (RuntimeError, ValueError) as e:
+            if fallback_reason:
+                print(f"ℹ️ Fallback modu etkin: tüm görünür GPU'lar kullanılacak")
+            else:
+                print(f"ℹ️ GPU modu: {GPU_MODE} → tüm görünür GPU'lar kullanılacak")
+    except RuntimeError as e:
         print(f"GPU seçim hatası: {e}")
 
     try:

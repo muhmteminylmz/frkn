@@ -1,6 +1,6 @@
 # frkn
 
-## Yerelde çalıştırma (GTX 1650 öncelikli)
+## Yerelde GPU yapılandırması
 
 `kod.py` artık GPU seçimini ortam değişkenleriyle kontrol eder:
 
