@@ -254,10 +254,13 @@ def build_cnn_model(hp: HyperParams) -> tf.keras.Model:
 
     # Normalizasyon ve veri artırma (eğitimde aktif, evaluate/predict'te pasif)
     x = tf.keras.layers.Rescaling(1.0 / 255)(inputs)
-    x = tf.keras.layers.RandomFlip("horizontal")(x)
-    x = tf.keras.layers.RandomRotation(0.15)(x)
-    x = tf.keras.layers.RandomZoom(0.15)(x)
-    x = tf.keras.layers.RandomContrast(0.1)(x)
+    # Random* augmentasyon katmanları bazı ortamlarda bfloat16 ile hata verebildiğinden
+    # augmentasyon girişini float32'de tut.
+    x = tf.keras.layers.Lambda(lambda t: tf.cast(t, tf.float32))(x)
+    x = tf.keras.layers.RandomFlip("horizontal", dtype='float32')(x)
+    x = tf.keras.layers.RandomRotation(0.15, dtype='float32')(x)
+    x = tf.keras.layers.RandomZoom(0.15, dtype='float32')(x)
+    x = tf.keras.layers.RandomContrast(0.1, dtype='float32')(x)
 
     # Konvolüsyon blokları: Residual + SE dikkat – her blokta filtre sayısı 2 katına çıkar
     f = hp.filters
@@ -315,9 +318,10 @@ def build_cnn_baseline() -> tf.keras.Model:
     """
     model = tf.keras.Sequential([
         tf.keras.layers.Rescaling(1.0 / 255, input_shape=(IMG_SIZE[0], IMG_SIZE[1], 3)),
-        tf.keras.layers.RandomFlip("horizontal"),
-        tf.keras.layers.RandomRotation(0.1),
-        tf.keras.layers.RandomZoom(0.1),
+        tf.keras.layers.Lambda(lambda t: tf.cast(t, tf.float32)),
+        tf.keras.layers.RandomFlip("horizontal", dtype='float32'),
+        tf.keras.layers.RandomRotation(0.1, dtype='float32'),
+        tf.keras.layers.RandomZoom(0.1, dtype='float32'),
         # Blok 1
         tf.keras.layers.Conv2D(32, (3, 3), activation='relu', padding='same'),
         tf.keras.layers.BatchNormalization(),
