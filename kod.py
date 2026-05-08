@@ -252,8 +252,8 @@ def build_cnn_model(hp: HyperParams) -> tf.keras.Model:
         x = tf.keras.layers.Activation('relu')(x)
 
         x = tf.keras.layers.MaxPooling2D(2, 2)(x)
-        spatial_dropout = min(max(hp.dropout * 0.5, MIN_SPATIAL_DROPOUT), MAX_SPATIAL_DROPOUT)
-        x = tf.keras.layers.SpatialDropout2D(spatial_dropout)(x)
+        spatial_dropout_rate = min(max(hp.dropout * 0.5, MIN_SPATIAL_DROPOUT), MAX_SPATIAL_DROPOUT)
+        x = tf.keras.layers.SpatialDropout2D(spatial_dropout_rate)(x)
         f = min(f * 2, MAX_FILTERS)   # Modül düzeyinde sabit ile sınırla
 
     # Sınıflandırıcı kafası
