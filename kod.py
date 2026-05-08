@@ -127,6 +127,8 @@ TRAIN_DIR = "dataset/train"
 TEST_DIR  = "dataset/test"
 AUTOTUNE     = tf.data.AUTOTUNE
 MAX_FILTERS  = 512  # Her blokta 2x artan filtre sayısı için üst sınır
+MIN_SPATIAL_DROPOUT = 0.05
+MAX_SPATIAL_DROPOUT = 0.35
 
 # Dataset cache (batch_size → (train_ds, val_ds, test_ds))
 _gen_cache = {}
@@ -250,7 +252,8 @@ def build_cnn_model(hp: HyperParams) -> tf.keras.Model:
         x = tf.keras.layers.Activation('relu')(x)
 
         x = tf.keras.layers.MaxPooling2D(2, 2)(x)
-        x = tf.keras.layers.SpatialDropout2D(min(max(hp.dropout * 0.5, 0.05), 0.35))(x)
+        spatial_dropout = min(max(hp.dropout * 0.5, MIN_SPATIAL_DROPOUT), MAX_SPATIAL_DROPOUT)
+        x = tf.keras.layers.SpatialDropout2D(spatial_dropout)(x)
         f = min(f * 2, MAX_FILTERS)   # Modül düzeyinde sabit ile sınırla
 
     # Sınıflandırıcı kafası
