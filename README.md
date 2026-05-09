@@ -1,6 +1,6 @@
 # frkn
 
-Bu proje, **ikili atık sınıflandırma** (Organic vs Recyclable) için TensorFlow/Keras tabanlı bir CNN kurar ve hiperparametreleri **G-HS (Global-best Harmony Search) + OBL (Opposition-Based Learning) + dinamik PAR/BW** ile optimize eder. Tüm akış tek dosyada (`/home/runner/work/frkn/frkn/kod.py`) toplanmıştır.
+Bu proje, **ikili atık sınıflandırma** (Organic vs Recyclable) için TensorFlow/Keras tabanlı bir CNN kurar ve hiperparametreleri **G-HS (Global-best Harmony Search) + OBL (Opposition-Based Learning) + dinamik PAR/BW** ile optimize eder. Tüm akış tek dosyada (`kod.py`) toplanmıştır.
 
 ---
 
@@ -57,10 +57,10 @@ Koddaki precision yönetimi doğrudan GPU tespitine bağlıdır:
    - olmazsa `mixed_bfloat16`
    - o da olmazsa FP32
 
-### 3.2 “fo16 mi go32 mi bfp16 mi?” sorusunun kod karşılığı
+### 3.2 “fp16 mi fp32 mi bfp16 mi?” sorusunun kod karşılığı
 
-- `fo16` ifadesi pratikte burada **`float16` (FP16)** anlamına gelir.
-- `go32` ifadesi pratikte **`float32` (FP32)** anlamına gelir.
+- `fp16` burada **`float16` (FP16)** anlamına gelir.
+- `fp32` burada **`float32` (FP32)** anlamına gelir.
 - `bfp16` burada TensorFlow’da **`bfloat16` (BF16)** olarak geçer.
 
 Bu projede **öncelik sırası**:
@@ -222,7 +222,7 @@ FRKN_GPU_MODE=nvidia python kod.py
 ## 11) Dosya yapısı
 
 ```text
-/home/runner/work/frkn/frkn/
+frkn/
 ├── kod.py
 ├── README.md
 └── .gitignore
