@@ -57,11 +57,11 @@ Koddaki precision yönetimi doğrudan GPU tespitine bağlıdır:
    - olmazsa `mixed_bfloat16`
    - o da olmazsa FP32
 
-### 3.2 “fp16 mi fp32 mi bfp16 mi?” sorusunun kod karşılığı
+### 3.2 “fp16 mi fp32 mi bf16 mi?” sorusunun kod karşılığı
 
 - `fp16` burada **`float16` (FP16)** anlamına gelir.
 - `fp32` burada **`float32` (FP32)** anlamına gelir.
-- `bfp16` burada TensorFlow’da **`bfloat16` (BF16)** olarak geçer.
+- `bf16` burada TensorFlow’da **`bfloat16` (BF16)** olarak geçer.
 
 Bu projede **öncelik sırası**:
 1. `mixed_float16`
