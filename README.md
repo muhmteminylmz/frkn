@@ -48,7 +48,7 @@ Akış sırası:
 
 Koddaki precision yönetimi doğrudan GPU tespitine bağlıdır:
 
-### 3.1 Karar ağacı
+### 3.1 Karar akışı
 
 1. GPU yoksa: **FP32** (CPU).
 2. GPU varsa ve cihaz adı `DML`/`PluggableDevice` ise (DirectML): **FP32** zorunlu.
@@ -76,7 +76,7 @@ Bu projede **öncelik sırası**:
 
 ### 3.4 Katman bazlı dtype davranışı
 
-Global policy mixed olsa bile kod kritik yerleri bilinçli şekilde FP32’de sabitler:
+Global policy mixed olsa bile kod kritik yerleri bilinçli şekilde FP32 seviyesinde sabitler:
 
 - Augmentation girişi: `Lambda(cast float32)`
 - `RandomFlip/Rotation/Zoom/Contrast`: `dtype='float32'`
