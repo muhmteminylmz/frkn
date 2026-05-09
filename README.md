@@ -51,7 +51,7 @@ Koddaki precision yönetimi doğrudan GPU tespitine bağlıdır:
 ### 3.1 Karar akışı
 
 1. GPU yoksa: **FP32** (CPU).
-2. GPU varsa ve cihaz adı `DML`/`PluggableDevice` ise (DirectML): **FP32** zorunlu (DirectML tarafında mixed precision kararlılığı sınırlı olabildiği için).
+2. GPU varsa ve cihaz adı `DML`/`PluggableDevice` ise (DirectML): **FP32** zorunlu (DirectML tarafında mixed precision kararlılığı sınırlı olabildiğinden).
 3. GPU varsa ve DirectML değilse:
    - Önce `mixed_float16`
    - olmazsa `mixed_bfloat16`
@@ -81,7 +81,7 @@ Global policy mixed olsa bile kod kritik yerleri bilinçli şekilde FP32 seviyes
 - Çıkış katmanı: `Dense(..., dtype='float32')`
 
 Amaç:
-- bazı ortamlarda augmentation + BF16 uyumsuzluklarını azaltmak,
+- özellikle DirectML/PluggableDevice ve bazı TensorFlow+sürücü kombinasyonlarında görülebilen augmentation + BF16 uyumsuzluklarını azaltmak,
 - binary sınıflandırma çıkışında numerik kararlılığı korumak.
 
 ---
