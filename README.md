@@ -51,7 +51,7 @@ Koddaki precision yönetimi doğrudan GPU tespitine bağlıdır:
 ### 3.1 Karar akışı
 
 1. GPU yoksa: **FP32** (CPU).
-2. GPU varsa ve cihaz adı `DML`/`PluggableDevice` ise (DirectML): **FP32** zorunlu.
+2. GPU varsa ve cihaz adı `DML`/`PluggableDevice` ise (DirectML): **FP32** zorunlu (DirectML tarafında mixed precision kararlılığı sınırlı olabildiği için).
 3. GPU varsa ve DirectML değilse:
    - Önce `mixed_float16`
    - olmazsa `mixed_bfloat16`
@@ -59,9 +59,7 @@ Koddaki precision yönetimi doğrudan GPU tespitine bağlıdır:
 
 ### 3.2 “fp16 mi fp32 mi bf16 mi?” sorusunun kod karşılığı
 
-- `fp16` burada **`float16` (FP16)** anlamına gelir.
-- `fp32` burada **`float32` (FP32)** anlamına gelir.
-- `bf16` burada TensorFlow’da **`bfloat16` (BF16)** olarak geçer.
+Bu dokümanda `fp16=float16`, `fp32=float32`, `bf16=bfloat16` anlamında kullanılır.
 
 Bu projede **öncelik sırası**:
 1. `mixed_float16`
@@ -90,7 +88,7 @@ Amaç:
 
 ## 4) Veri katmanı (create_datasets)
 
-Kaynaklar:
+Kaynaklar (proje kök dizinine göre relatif yollar):
 - `dataset/train`
 - `dataset/test`
 
