@@ -1,147 +1,188 @@
 # frkn
 
-Bu proje, **ikili atık sınıflandırma** (Organic vs Recyclable) problemi için bir CNN modeli kurar ve modelin hiperparametrelerini **G-HS (Global-best Harmony Search) + OBL (Opposition-Based Learning) + dinamik PAR/BW** ile optimize eder. Kod tek giriş noktası olan `kod.py` dosyasında toplanmıştır.
+Bu proje, **ikili atık sınıflandırma** (Organic vs Recyclable) için TensorFlow/Keras tabanlı bir CNN kurar ve hiperparametreleri **G-HS (Global-best Harmony Search) + OBL (Opposition-Based Learning) + dinamik PAR/BW** ile optimize eder. Tüm akış tek dosyada (`/home/runner/work/frkn/frkn/kod.py`) toplanmıştır.
 
 ---
 
 ## 1) Projenin amacı
 
-Proje iki yaklaşımı kıyaslar:
+Kod iki yaklaşımı karşılaştırır:
 
-1. **Baseline CNN** (sabit hiperparametreler)
-2. **G-HS optimize edilmiş CNN** (dinamik hiperparametre araması)
+1. **Baseline CNN** (sabit hiperparametre)
+2. **G-HS ile optimize edilmiş CNN** (SE + Residual + label smoothing)
 
-Çıktı olarak:
-- Test metrikleri (loss/accuracy)
-- İyileşme yüzdeleri
+Çıktılar:
+- Test loss / accuracy
+- Baseline ↔ optimize model karşılaştırması
 - Yakınsama grafikleri (`ghs_results.png`)
 - Özet rapor (`summary.json`)
 
 ---
 
-## 2) Yüksek seviye mimari
+## 2) Uçtan uca mimari (kodla birebir)
 
 ```mermaid
 flowchart TD
-    A[run()] --> B[Ortam Hazırlığı\nSeed + GPU + Mixed Precision]
-    B --> C[G-HS Optimizasyonu\nghs_optimize]
-    C --> D[Fitness Hesabı Döngüsü\nevaluate_fitness]
-    D --> E[Dataset Pipeline\ncreate_datasets]
-    D --> F[Model İnşası\nbuild_cnn_model]
-    C --> G[En İyi Hiperparametreler]
-    G --> H[Final Eğitim: G-HS-CNN\nfinal_evaluate_ghs_cnn]
-    G --> I[Final Eğitim: Baseline\nfinal_evaluate_cnn_baseline]
-    H --> J[Test Sonuçları]
+    A[run] --> B[GPU ve precision kurulumu]
+    B --> C[ghs_optimize]
+    C --> D[evaluate_fitness]
+    D --> E[create_datasets]
+    D --> F[build_cnn_model]
+    C --> G[best_hp]
+    G --> H[final_evaluate_ghs_cnn]
+    G --> I[final_evaluate_cnn_baseline]
+    H --> J[plot_results + summary.json]
     I --> J
-    J --> K[Grafikler\nplot_results]
-    J --> L[JSON Özet\nsummary.json]
 ```
 
----
-
-## 3) Katmanlı yapı ve sorumluluklar
-
-### A. Ortam ve donanım katmanı
-- **GPU seçim stratejisi**: `FRKN_GPU_MODE` (`nvidia`, `auto`, `index`, `cpu`) ve `FRKN_GPU_INDEX`.
-- TensorFlow GPU görünürlüğü ayarlanır, memory growth açılır.
-- Uygun ortamda mixed precision (`mixed_float16` / `mixed_bfloat16`) etkinleştirilir.
-
-### B. Deney konfigürasyon katmanı
-- `QUICK_TEST`: hızlı/mini deney akışı.
-- `DATASET_SIZE`: eğitim/doğrulama veri hacmini sınırlama.
-- Boyut, batch, filtre üst sınırları gibi sabitler (`MAX_FILTERS`, `BOUNDS`, `CHOICES`).
-
-### C. Veri katmanı (`create_datasets`)
-- `tf.keras.utils.image_dataset_from_directory` ile train/val/test yüklenir.
-- `train` için `%80`, `val` için `%20` ayrım yapılır.
-- Alt küme seçimi (`QUICK_TEST` veya `DATASET_SIZE`) uygulanır.
-- `prefetch(AUTOTUNE)` ile pipeline hızlandırılır.
-- Batch boyutuna göre cache (`_gen_cache`) kullanılır.
-
-### D. Modelleme katmanı
-
-#### 1) Önerilen model (`build_cnn_model`)
-Blok yapısı:
-- Rescaling + veri artırma
-- Her blokta:
-  - Conv → BN → ReLU
-  - Conv → BN
-  - **SE (Squeeze-and-Excitation)** kanal dikkati
-  - **Residual bağlantı** (gerekirse 1x1 projeksiyon)
-  - ReLU → MaxPool → SpatialDropout2D
-- Sınıflandırıcı başlık:
-  - GAP → Dense → Dropout → Sigmoid
-
-Ek özellikler:
-- `BinaryCrossentropy(label_smoothing=0.05)`
-- Adam optimizer (öğrenme oranı hiperparametredir)
-
-#### 2) Baseline model (`build_cnn_baseline`)
-- 3 sabit conv blok (32→64→128)
-- Flatten + Dense ile klasik referans mimari
-
-### E. Optimizasyon katmanı (`ghs_optimize`)
-G-HS süreci:
-1. Harmony Memory (HM) başlangıcı (elite seed + rastgele harmoniler)
-2. Her iterasyonda yeni aday üretimi:
-   - **HMCR** ile hafızadan seçim
-   - **PAR/BW** ile ince ayar (dinamik artan/azalan)
-   - **OBL** ile karşıt örnek değerlendirmesi
-3. Yeni adayın fitness hesabı (`evaluate_fitness`)
-4. Daha iyi ise HM’de en kötü harmoninin yerine geçmesi
-5. Yakınsama geçmişinin tutulması
-
-### F. Değerlendirme/raporlama katmanı
-- En iyi hiperparametre ile final G-HS-CNN eğitimi
-- Baseline eğitimi
-- Test metriklerinin karşılaştırılması
-- Grafik ve JSON rapor üretimi
+Akış sırası:
+1. **Başlangıç**: seed, GPU modu, mixed precision politikası.
+2. **Optimizasyon**: G-HS hiperparametre arama döngüsü.
+3. **Fitness**: her aday için kısa eğitim + `val_loss` ölçümü.
+4. **Final**: en iyi hiperparametre ile tam eğitim, baseline ile karşılaştırma.
+5. **Raporlama**: görsel + JSON özet.
 
 ---
 
-## 4) Detaylı veri ve kontrol akışı
+## 3) Sayısal hassasiyet (FP16 / BF16 / FP32) – en detaylı katman
 
-### 4.1 Fitness değerlendirme akışı
-```text
-evaluate_fitness(hp)
-  -> clear_session + cache temizliği
-  -> create_datasets(hp.batch_size, use_subset=True)
-  -> build_cnn_model(hp)
-  -> fit(..., EarlyStopping + ReduceLROnPlateau)
-  -> min(val_loss) döndür
-```
+Koddaki precision yönetimi doğrudan GPU tespitine bağlıdır:
 
-### 4.2 Ana çalışma akışı
-```text
-run()
-  -> G-HS optimizasyonu (best_hp)
-  -> final_evaluate_ghs_cnn(best_hp)
-  -> final_evaluate_cnn_baseline()
-  -> plot_results(...)
-  -> summary.json yaz
-```
+### 3.1 Karar ağacı
+
+1. GPU yoksa: **FP32** (CPU).
+2. GPU varsa ve cihaz adı `DML`/`PluggableDevice` ise (DirectML): **FP32** zorunlu.
+3. GPU varsa ve DirectML değilse:
+   - Önce `mixed_float16`
+   - olmazsa `mixed_bfloat16`
+   - o da olmazsa FP32
+
+### 3.2 “fo16 mi go32 mi bfp16 mi?” sorusunun kod karşılığı
+
+- `fo16` ifadesi pratikte burada **`float16` (FP16)** anlamına gelir.
+- `go32` ifadesi pratikte **`float32` (FP32)** anlamına gelir.
+- `bfp16` burada TensorFlow’da **`bfloat16` (BF16)** olarak geçer.
+
+Bu projede **öncelik sırası**:
+1. `mixed_float16`
+2. `mixed_bfloat16`
+3. `float32`
+
+### 3.3 Neden bu sıra kullanılıyor?
+
+- NVIDIA/RTX/GTX tarafında FP16 genelde daha yaygın ve hızlıdır.
+- FP16 destek problemi olursa BF16 denenir.
+- DirectML ortamında mixed precision yerine FP32 tercih edilerek stabilite korunur.
+
+### 3.4 Katman bazlı dtype davranışı
+
+Global policy mixed olsa bile kod kritik yerleri bilinçli şekilde FP32’de sabitler:
+
+- Augmentation girişi: `Lambda(cast float32)`
+- `RandomFlip/Rotation/Zoom/Contrast`: `dtype='float32'`
+- Çıkış katmanı: `Dense(..., dtype='float32')`
+
+Amaç:
+- bazı ortamlarda augmentation + BF16 uyumsuzluklarını azaltmak,
+- binary sınıflandırma çıkışında numerik kararlılığı korumak.
 
 ---
 
-## 5) Fonksiyon haritası
+## 4) Veri katmanı (create_datasets)
 
-- **Ortam/altyapı**: `set_seed`, GPU kurulum bloğu
-- **Veri**: `create_datasets`
-- **Model blokları**: `_se_block`, `build_cnn_model`, `build_cnn_baseline`
-- **Optimizasyon**: `evaluate_fitness`, `random_hyperparams`, `ghs_optimize`
-- **Final değerlendirme**: `final_evaluate_ghs_cnn`, `final_evaluate_cnn_baseline`
-- **Çıktılar**: `plot_results`, `run`
+Kaynaklar:
+- `dataset/train`
+- `dataset/test`
+
+İşleyiş:
+1. `image_dataset_from_directory` ile train/val (`validation_split=0.2`) üretilir.
+2. Test seti ayrı dizinden yüklenir.
+3. `QUICK_TEST` veya `DATASET_SIZE` ile örnek sayısı kısıtlanabilir.
+4. Batch-size bazlı cache kullanılır (`_gen_cache`).
+5. `prefetch(AUTOTUNE)` ile pipeline hızlandırılır.
 
 ---
 
-## 6) Yerelde GPU yapılandırması
+## 5) Modelleme katmanı – önerilen G-HS-CNN
 
-`kod.py` GPU seçimini ortam değişkenleriyle kontrol eder:
+### 5.1 Blok topolojisi
 
-- `FRKN_GPU_MODE=nvidia` (varsayılan): NVIDIA GPU varsa onu seçer
-- `FRKN_GPU_MODE=auto`: görünür GPU'larda otomatik devam eder
-- `FRKN_GPU_MODE=index` + `FRKN_GPU_INDEX=0`: belirli indeksteki GPU'yu seçer
-- `FRKN_GPU_MODE=cpu`: CPU ile çalıştırır
+Her blok:
+1. Conv2D
+2. BatchNorm
+3. ReLU
+4. Conv2D
+5. BatchNorm
+6. SE block
+7. Residual Add (gerekirse 1x1 projeksiyon)
+8. ReLU
+9. MaxPool
+10. SpatialDropout2D
+
+Filtre sayısı her blokta 2x artar, üst sınır `MAX_FILTERS` ile kısıtlanır.
+
+### 5.2 SE (Squeeze-and-Excitation)
+
+`_se_block` kanal dikkatini öğrenir:
+- GAP → küçük Dense(ReLU) → Dense(sigmoid) → kanal çarpımı.
+
+Bu sayede hangi feature map’lerin daha kritik olduğu örnek bazında ağırlıklandırılır.
+
+### 5.3 Residual bağlantı
+
+`shortcut.shape[-1] != f` ise 1x1 Conv + BN ile kanal eşleştirme yapılıp toplama uygulanır.
+Bu, daha derin yapılarda gradyan akışını korur.
+
+### 5.4 Kayıp/optimizer
+
+- Optimizer: Adam (`learning_rate` optimize edilen hiperparametre)
+- Loss: `BinaryCrossentropy(label_smoothing=0.05)`
+- Metric: `accuracy`
+
+---
+
+## 6) Baseline CNN
+
+Referans model, sabit ve daha klasik bir yapıdır:
+- 3 conv blok (32→64→128)
+- BN + MaxPool
+- Flatten + Dense
+- Sigmoid çıkış (`dtype='float32'`)
+
+Optimizasyon yoktur; karşılaştırma için sabit bir çıpa görevi görür.
+
+---
+
+## 7) G-HS + OBL + dinamik PAR/BW optimizasyonu
+
+Optimize edilen hiperparametreler:
+- `filters`, `kernel_size`, `num_blocks`, `dropout`, `learning_rate`, `batch_size`, `dense_units`
+
+Temel adımlar:
+1. Harmony Memory başlatılır (ilk eleman `ELITE_SEED`).
+2. Her iterasyonda yeni aday üretilir.
+3. HMCR ile bellekten seçim yapılır.
+4. PAR/BW ile ayar yapılır (PAR artar, BW üstel azalır).
+5. OBL kolunda random ve opposite aday fitness karşılaştırması yapılır.
+6. Yeni aday daha iyiyse HM’de en kötü çözümü değiştirir.
+7. En iyi fitness geçmişi `convergence` olarak tutulur.
+
+Fitness fonksiyonu `evaluate_fitness`:
+- kısa epoch eğitimi,
+- EarlyStopping + ReduceLROnPlateau,
+- skor olarak `min(val_loss)` döndürür.
+
+---
+
+## 8) Çalışma modları
+
+- `QUICK_TEST=True`: küçük veri, az iterasyon/epoch (hızlı doğrulama)
+- `QUICK_TEST=False`: tam deney
+- `DATASET_SIZE`: 500–22500 arası manuel veri büyüklüğü
+
+GPU seçim değişkenleri:
+- `FRKN_GPU_MODE=nvidia|auto|index|cpu`
+- `FRKN_GPU_INDEX=<int>` (index modunda)
 
 Örnek:
 
@@ -151,27 +192,38 @@ FRKN_GPU_MODE=nvidia python kod.py
 
 ---
 
-## 7) Üretilen çıktı dosyaları
+## 9) Çıktılar
 
-- `ghs_results.png`  
-  - Yakınsama eğrisi
-  - İyileşme yüzdesi
-  - Baseline vs G-HS-CNN accuracy karşılaştırması
+- `ghs_results.png`
+  - yakınsama eğrisi
+  - iyileşme yüzdesi
+  - baseline vs optimized accuracy
 
-- `summary.json`  
-  - En iyi hiperparametreler
-  - Test metrikleri
-  - İyileşme yüzdeleri
-  - Yakınsama geçmişi
+- `summary.json`
+  - en iyi hiperparametreler
+  - test sonuçları
+  - iyileşme yüzdeleri
+  - yakınsama geçmişi
 
 ---
 
-## 8) Klasör ve dosya görünümü
+## 10) Fonksiyon haritası
+
+- Ortam/seed: `set_seed`, GPU+precision kurulum bloğu
+- Veri: `create_datasets`
+- Model: `_se_block`, `build_cnn_model`, `build_cnn_baseline`
+- Fitness: `evaluate_fitness`
+- Arama: `random_hyperparams`, `ghs_optimize`
+- Final değerlendirme: `final_evaluate_ghs_cnn`, `final_evaluate_cnn_baseline`
+- Raporlama: `plot_results`, `run`
+
+---
+
+## 11) Dosya yapısı
 
 ```text
-frkn/
-├── kod.py      # Tüm eğitim/optimizasyon ve raporlama akışı
-├── README.md   # Bu dokümantasyon
+/home/runner/work/frkn/frkn/
+├── kod.py
+├── README.md
 └── .gitignore
 ```
-
