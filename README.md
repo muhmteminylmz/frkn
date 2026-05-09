@@ -68,7 +68,7 @@ Bu projede **öncelik sırası**:
 
 ### 3.3 Neden bu sıra kullanılıyor?
 
-- NVIDIA/RTX/GTX tarafında FP16 genelde daha yaygın ve hızlıdır.
+- NVIDIA tarafında FP16, uygun GPU mimarilerinde Tensor Core/yarı hassasiyet hızlandırması ve daha düşük bellek bant genişliği tüketimi sayesinde çoğu eğitim iş yükünde avantaj sağlayabilir.
 - FP16 destek problemi olursa BF16 denenir.
 - DirectML ortamında mixed precision yerine FP32 tercih edilerek stabilite korunur.
 
