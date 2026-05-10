@@ -6,15 +6,17 @@ Bu proje, **ikili atık sınıflandırma** (Organic vs Recyclable) için TensorF
 
 ## 1) Projenin amacı
 
-Kod iki yaklaşımı karşılaştırır:
+Kod beş yaklaşımı karşılaştırır:
 
-1. **Baseline CNN** (sabit hiperparametre)
-2. **G-HS ile optimize edilmiş CNN** (SE + Residual + label smoothing)
+1. **G-HS-CNN v2** (SE + Residual + label smoothing, G-HS ile optimize)
+2. **Klasik CNN** (sabit hiperparametre baseline)
+3. **ResNet50** (ImageNet ağırlıkları ile transfer learning, feature extractor dondurulmuş)
+4. **SVM** (flatten edilmiş görüntüler ile scikit-learn)
+5. **Random Forest** (flatten edilmiş görüntüler ile scikit-learn)
 
 Çıktılar:
-- Test loss / accuracy
-- Baseline ↔ optimize model karşılaştırması
-- Yakınsama grafikleri (`ghs_results.png`)
+- Her model için: Accuracy, Precision, Recall, F1-Score, AUC
+- 5 modelin ortak ROC eğrileri + F1 bar + confusion matrix subplotları (`model_comparison_results.png`)
 - Özet rapor (`summary.json`)
 
 ---
@@ -192,15 +194,14 @@ FRKN_GPU_MODE=nvidia python kod.py
 
 ## 9) Çıktılar
 
-- `ghs_results.png`
-  - yakınsama eğrisi
-  - iyileşme yüzdesi
-  - baseline vs optimized accuracy
+- `model_comparison_results.png`
+  - 5 modelin ortak ROC eğrileri
+  - 5 modelin F1-Score bar grafiği
+  - 5 modelin confusion matrix görselleri
 
 - `summary.json`
   - en iyi hiperparametreler
-  - test sonuçları
-  - iyileşme yüzdeleri
+  - model bazlı test metrikleri (Accuracy, Precision, Recall, F1-Score, AUC)
   - yakınsama geçmişi
 
 ---
@@ -212,7 +213,7 @@ FRKN_GPU_MODE=nvidia python kod.py
 - Model: `_se_block`, `build_cnn_model`, `build_cnn_baseline`
 - Fitness: `evaluate_fitness`
 - Arama: `random_hyperparams`, `ghs_optimize`
-- Final değerlendirme: `final_evaluate_ghs_cnn`, `final_evaluate_cnn_baseline`
+- Final değerlendirme: `final_evaluate_ghs_cnn`, `final_evaluate_cnn_baseline`, `final_evaluate_resnet50`, `final_evaluate_sklearn_models`
 - Raporlama: `plot_results`, `run`
 
 ---
