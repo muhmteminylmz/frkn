@@ -188,6 +188,7 @@ MAX_FILTERS  = 512  # Her blokta 2x artan filtre sayısı için üst sınır
 MIN_SPATIAL_DROPOUT = 0.05
 MAX_SPATIAL_DROPOUT = 0.35
 RF_N_ESTIMATORS = 300  # Balance between Random Forest accuracy and training time
+COMPILE_STEPS_PER_EXECUTION = 16 if QUICK_TEST else 32
 CLASS_LABELS = ["Organic", "Recyclable"]
 
 # Dataset cache (batch_size → (train_ds, val_ds, test_ds))
@@ -295,14 +296,12 @@ def compute_classification_metrics(y_true, y_prob):
 
 def evaluate_keras_model(model, test_ds):
     """Keras modeli için olasılık çıktıları ve metrikleri üret."""
-    y_true_parts, y_prob_parts = [], []
-    for xb, yb in test_ds:
-        probs = model.predict(xb, verbose=0).reshape(-1)
-        y_prob_parts.append(probs)
+    y_true_parts = []
+    for _, yb in test_ds:
         y_true_parts.append(flatten_binary_labels(yb.numpy()).astype(np.int32))
 
     y_true = np.concatenate(y_true_parts, axis=0)
-    y_prob = np.concatenate(y_prob_parts, axis=0)
+    y_prob = model.predict(test_ds, verbose=0).reshape(-1)
     metrics = compute_classification_metrics(y_true, y_prob)
     return y_true, y_prob, metrics
 
@@ -388,7 +387,8 @@ def build_cnn_model(hp: HyperParams) -> tf.keras.Model:
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=hp.learning_rate),
         loss=tf.keras.losses.BinaryCrossentropy(label_smoothing=0.05),
-        metrics=['accuracy']
+        metrics=['accuracy'],
+        steps_per_execution=COMPILE_STEPS_PER_EXECUTION,
     )
     return model
 
@@ -430,7 +430,8 @@ def build_cnn_baseline() -> tf.keras.Model:
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
         loss='binary_crossentropy',
-        metrics=['accuracy']
+        metrics=['accuracy'],
+        steps_per_execution=COMPILE_STEPS_PER_EXECUTION,
     )
     return model
 
@@ -746,6 +747,7 @@ def build_resnet50_model() -> tf.keras.Model:
         optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
         loss="binary_crossentropy",
         metrics=["accuracy"],
+        steps_per_execution=COMPILE_STEPS_PER_EXECUTION,
     )
     return model
 
