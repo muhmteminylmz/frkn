@@ -70,6 +70,12 @@ DATASET_SIZE = None   # Örnek: 5000, 10000, None (otomatik)
 if DATASET_SIZE is not None and not (500 <= DATASET_SIZE <= 22500):
     raise ValueError(f"DATASET_SIZE {DATASET_SIZE} geçersiz. Geçerli aralık: 500 – 22500")
 
+if QUICK_TEST and DATASET_SIZE is not None:
+    raise ValueError(
+        "QUICK_TEST=True ile DATASET_SIZE birlikte kullanılamaz. "
+        "Hızlı test için DATASET_SIZE=None, daha büyük veri koşusu için QUICK_TEST=False kullanın."
+    )
+
 # =========================================================
 # GPU SETUP
 # =========================================================
@@ -439,7 +445,6 @@ def evaluate_fitness(hp: HyperParams, epochs: int = 3) -> float:
     """
     try:
         tf.keras.backend.clear_session()
-        _gen_cache.clear()  # Eski oturuma ait stale pipeline referanslarını serbest bırak
 
         train_ds, val_ds, _ = create_datasets(hp.batch_size, use_subset=True)
         model = build_cnn_model(hp)
@@ -571,7 +576,7 @@ def ghs_optimize(
         )
 
     HM = sorted(HM, key=lambda x: x["fitness"])
-    best_init = HM[0]["fitness"]
+    best_ever = HM[0]["fitness"]
 
     print("\n" + "=" * 70)
     print(">>> OPTİMİZASYON BAŞLADI")
@@ -651,7 +656,12 @@ def ghs_optimize(
         best_now = HM[0]["fitness"]
         convergence.append(best_now)
 
-        improvement = ((best_init - best_now) / best_init) * 100 if best_init > 0 else 0
+        if best_now < best_ever:
+            prev_best = best_ever
+            best_ever = best_now
+            improvement = ((prev_best - best_ever) / prev_best) * 100 if prev_best > 0 else 0
+        else:
+            improvement = 0
         print(f"Iter {t:02d}/{NI} | New: {new_fitness:.6f} | Best: {best_now:.6f} | +{improvement:.1f}%")
 
     return HM[0], convergence
