@@ -659,7 +659,7 @@ def ghs_optimize(
         if best_now < best_ever:
             prev_best = best_ever
             best_ever = best_now
-            improvement = ((prev_best - best_ever) / prev_best) * 100 if prev_best != 0 else 0
+            improvement = ((prev_best - best_ever) / prev_best) * 100 if prev_best > 0 else 0
         else:
             improvement = 0
         print(f"Iter {t:02d}/{NI} | New: {new_fitness:.6f} | Best: {best_now:.6f} | +{improvement:.1f}%")
