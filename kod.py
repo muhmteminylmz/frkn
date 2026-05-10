@@ -656,9 +656,10 @@ def ghs_optimize(
         best_now = HM[0]["fitness"]
         convergence.append(best_now)
 
-        if best_now < best_ever and best_ever > 0:
-            improvement = ((best_ever - best_now) / best_ever) * 100
+        if best_now < best_ever:
+            prev_best = best_ever
             best_ever = best_now
+            improvement = ((prev_best - best_ever) / prev_best) * 100 if prev_best != 0 else 0
         else:
             improvement = 0
         print(f"Iter {t:02d}/{NI} | New: {new_fitness:.6f} | Best: {best_now:.6f} | +{improvement:.1f}%")
