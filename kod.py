@@ -188,6 +188,7 @@ MAX_FILTERS  = 512  # Her blokta 2x artan filtre sayısı için üst sınır
 MIN_SPATIAL_DROPOUT = 0.05
 MAX_SPATIAL_DROPOUT = 0.35
 RF_N_ESTIMATORS = 300  # Balance between Random Forest accuracy and training time
+# Python çağrı overhead'ini azaltarak özellikle GPU eğitiminde batch yürütmeyi hızlandırır.
 COMPILE_STEPS_PER_EXECUTION = 16 if QUICK_TEST else 32
 CLASS_LABELS = ["Organic", "Recyclable"]
 
