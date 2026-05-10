@@ -187,7 +187,7 @@ AUTOTUNE     = tf.data.AUTOTUNE
 MAX_FILTERS  = 512  # Her blokta 2x artan filtre sayısı için üst sınır
 MIN_SPATIAL_DROPOUT = 0.05
 MAX_SPATIAL_DROPOUT = 0.35
-RF_N_ESTIMATORS = 300  # Balance between Random Forest accuracy and training time
+RF_N_ESTIMATORS = 100  # Balance between Random Forest accuracy and training time
 CLASS_LABELS = ["Organic", "Recyclable"]
 
 # Dataset cache (batch_size → (train_ds, val_ds, test_ds))
@@ -195,6 +195,7 @@ _gen_cache = {}
 
 # Hızlı test modu ayarları
 IMG_SIZE = (64, 64) if QUICK_TEST else (128, 128)
+ML_IMG_SIZE = (32, 32)
 TRAIN_SUBSET = 2000   # QUICK_TEST=True iken kullanılacak eğitim örnek sayısı
 VAL_SUBSET   = 500    # QUICK_TEST=True iken kullanılacak doğrulama örnek sayısı
 
@@ -254,6 +255,18 @@ def dataset_to_numpy(ds):
     x_parts, y_parts = [], []
     for xb, yb in ds:
         x_parts.append(xb.numpy())
+        y_parts.append(flatten_binary_labels(yb.numpy()))
+    x = np.concatenate(x_parts, axis=0)
+    y = np.concatenate(y_parts, axis=0).astype(np.int32)
+    return x, y
+
+
+def dataset_to_numpy_small(ds):
+    """Sklearn benchmark için görüntüleri küçültüp numpy tensörlerine dönüştür."""
+    x_parts, y_parts = [], []
+    for xb, yb in ds:
+        xb_small = tf.image.resize(xb, ML_IMG_SIZE).numpy()
+        x_parts.append(xb_small)
         y_parts.append(flatten_binary_labels(yb.numpy()))
     x = np.concatenate(x_parts, axis=0)
     y = np.concatenate(y_parts, axis=0).astype(np.int32)
@@ -782,9 +795,9 @@ def final_evaluate_sklearn_models():
     print("\n🌲 SVM ve RANDOM FOREST EĞİTİLİYOR...")
     train_ds, val_ds, test_ds = create_datasets(32, use_subset=False)
 
-    x_train, y_train = dataset_to_numpy(train_ds)
-    x_val, y_val = dataset_to_numpy(val_ds)
-    x_test, y_test = dataset_to_numpy(test_ds)
+    x_train, y_train = dataset_to_numpy_small(train_ds)
+    x_val, y_val = dataset_to_numpy_small(val_ds)
+    x_test, y_test = dataset_to_numpy_small(test_ds)
 
     x_train = np.concatenate([x_train, x_val], axis=0)
     y_train = np.concatenate([y_train, y_val], axis=0)
@@ -794,7 +807,7 @@ def final_evaluate_sklearn_models():
 
     svm = make_pipeline(
         StandardScaler(),
-        SVC(kernel="rbf", probability=True, random_state=42),
+        SVC(kernel="linear", probability=True, random_state=42),
     )
     svm.fit(x_train, y_train)
     svm_prob = svm.predict_proba(x_test)[:, 1]
