@@ -181,7 +181,8 @@ AUTOTUNE     = tf.data.AUTOTUNE
 MAX_FILTERS  = 512  # Her blokta 2x artan filtre sayısı için üst sınır
 MIN_SPATIAL_DROPOUT = 0.05
 MAX_SPATIAL_DROPOUT = 0.35
-RF_N_ESTIMATORS = 300
+RF_N_ESTIMATORS = 300  # Random Forest için doğruluk-eğitim süresi dengesi
+CLASS_LABELS = ["Organic", "Recyclable"]
 
 # Dataset cache (batch_size → (train_ds, val_ds, test_ds))
 _gen_cache = {}
@@ -851,8 +852,8 @@ def plot_results(model_results):
         ax.set_title(f"{model_name}\nConfusion Matrix", fontweight="bold")
         ax.set_xlabel("Predicted")
         ax.set_ylabel("Actual")
-        ax.set_xticklabels(["Organic", "Recyclable"], rotation=20)
-        ax.set_yticklabels(["Organic", "Recyclable"], rotation=0)
+        ax.set_xticklabels(CLASS_LABELS, rotation=20)
+        ax.set_yticklabels(CLASS_LABELS, rotation=0)
 
     ax_empty = fig.add_subplot(gs[2, 2])
     ax_empty.axis("off")
