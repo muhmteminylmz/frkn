@@ -781,7 +781,7 @@ def plot_results(convergence, ghs_cnn_acc, baseline_acc):
 
 
 # =========================================================
-# 9. GÖRSELLEŞTİRME – Eğitim/Doğrulama Eğrileri, ROC ve Optimizasyon Karşılaştırması
+# 10d. GÖRSELLEŞTİRME – Eğitim/Doğrulama Eğrileri, ROC ve Optimizasyon Karşılaştırması
 # =========================================================
 def plot_learning_curves(histories: dict, output_path: str = "learning_curves.png"):
     """
@@ -988,7 +988,7 @@ def generate_report(metrics: dict, convergences: dict = None,
         lines.append("─── OPTİMİZASYON YAKINSAMA ÖZETİ ──────────────────────────────────")
         for opt_name, conv in convergences.items():
             if conv:
-                improvement_pct = (conv[0] - conv[-1]) / conv[0] * 100 if conv[0] != 0 else 0
+                improvement_pct = (conv[0] - conv[-1]) / abs(conv[0]) * 100 if conv[0] != 0 else 0
                 lines.append(
                     f"  {opt_name:<20} İlk: {conv[0]:.6f}  "
                     f"Son: {conv[-1]:.6f}  "
@@ -1126,14 +1126,16 @@ def run():
 
         # ── GA-CNN ve PSO-CNN yer tutucu yakınsama verileri ──────────────────
         # Not: Gerçek GA/PSO optimizasyonu eklendiğinde bu bölüm güncellenecek.
-        _c0 = convergence[0]
-        _cN = convergence[-1]
+        _c0 = convergence[0]   # Başlangıç kaybı
+        _cN = convergence[-1]  # OD-HS'nin yakınsadığı nihai kayıp
+        # Yer tutucu eğriler: f(i) = son_değer + (başlangıç - son_değer) * exp(-k*i)
+        # Katsayılar GA/PSO'nun OD-HS'ye kıyasla biraz daha kötü yakınsadığını simüle eder.
         ga_convergence = [
-            _cN * 1.12 + (_c0 * 1.18 - _cN * 1.12) * float(np.exp(-0.15 * i))
+            _cN * 1.12 + (_c0 * 1.18 - _cN * 1.12) * float(np.exp(-0.15 * i))  # GA: %12-18 daha yüksek
             for i in range(NI)
         ]
         pso_convergence = [
-            _cN * 1.06 + (_c0 * 1.10 - _cN * 1.06) * float(np.exp(-0.12 * i))
+            _cN * 1.06 + (_c0 * 1.10 - _cN * 1.06) * float(np.exp(-0.12 * i))  # PSO: %6-10 daha yüksek
             for i in range(NI)
         ]
         all_convergences = {
@@ -1204,8 +1206,8 @@ def run():
                 "test_accuracy": float(baseline_acc)
             },
             "all_model_metrics": {
-                k: {mk: float(mv) for mk, mv in v.items()}
-                for k, v in metrics_all.items()
+                model_name: {metric_key: float(metric_val) for metric_key, metric_val in model_vals.items()}
+                for model_name, model_vals in metrics_all.items()
             },
             "improvements": {
                 "loss_reduction_pct":  float(loss_improvement),
