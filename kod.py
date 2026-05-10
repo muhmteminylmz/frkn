@@ -248,10 +248,25 @@ def dataset_to_numpy(ds):
     x_parts, y_parts = [], []
     for xb, yb in ds:
         x_parts.append(xb.numpy())
-        y_parts.append(yb.numpy().reshape(-1))
+        y_parts.append(flatten_binary_labels(yb.numpy()))
     x = np.concatenate(x_parts, axis=0)
     y = np.concatenate(y_parts, axis=0).astype(np.int32)
     return x, y
+
+
+def flatten_binary_labels(y):
+    """Binary etiketleri güvenli biçimde 1D vektöre indirger."""
+    y = np.asarray(y)
+    if y.ndim == 1:
+        return y
+    if y.ndim == 2 and y.shape[1] == 1:
+        return y[:, 0]
+    raise ValueError(f"Beklenmeyen etiket şekli: {y.shape}. Beklenen: (N,) veya (N,1)")
+
+
+def flatten_and_normalize_images(x):
+    """Görüntüleri sklearn modelleri için düzleştir ve normalize et."""
+    return (x.reshape(x.shape[0], -1) / 255.0).astype(np.float32)
 
 
 def compute_classification_metrics(y_true, y_prob):
@@ -278,7 +293,7 @@ def evaluate_keras_model(model, test_ds):
     for xb, yb in test_ds:
         probs = model.predict(xb, verbose=0).reshape(-1)
         y_prob_parts.append(probs)
-        y_true_parts.append(yb.numpy().reshape(-1).astype(np.int32))
+        y_true_parts.append(flatten_binary_labels(yb.numpy()).astype(np.int32))
 
     y_true = np.concatenate(y_true_parts, axis=0)
     y_prob = np.concatenate(y_prob_parts, axis=0)
@@ -705,8 +720,7 @@ def final_evaluate_cnn_baseline(epochs: int = 15):
 def build_resnet50_model() -> tf.keras.Model:
     """ImageNet ağırlıklı ve dondurulmuş ResNet50 ile transfer learning modeli."""
     inputs = tf.keras.Input(shape=(IMG_SIZE[0], IMG_SIZE[1], 3))
-    x = tf.keras.layers.Lambda(lambda t: tf.cast(t, tf.float32))(inputs)
-    x = tf.keras.layers.Lambda(resnet_preprocess_input)(x)
+    x = tf.keras.layers.Lambda(lambda t: resnet_preprocess_input(tf.cast(t, tf.float32)))(inputs)
     base_model = ResNet50(
         include_top=False,
         weights="imagenet",
@@ -765,8 +779,8 @@ def final_evaluate_sklearn_models():
     x_train = np.concatenate([x_train, x_val], axis=0)
     y_train = np.concatenate([y_train, y_val], axis=0)
 
-    x_train = (x_train.reshape(x_train.shape[0], -1) / 255.0).astype(np.float32)
-    x_test = (x_test.reshape(x_test.shape[0], -1) / 255.0).astype(np.float32)
+    x_train = flatten_and_normalize_images(x_train)
+    x_test = flatten_and_normalize_images(x_test)
 
     svm = make_pipeline(
         StandardScaler(),
@@ -848,7 +862,7 @@ def plot_results(model_results):
     ]
     for ax, (model_name, result) in zip(cm_axes, model_results.items()):
         cm = np.asarray(result["metrics"]["confusion_matrix"])
-        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", cbar=False, ax=ax)
+        sns.heatmap(cm, annot=True, fmt="d", cmap="viridis", cbar=False, ax=ax)
         ax.set_title(f"{model_name}\nConfusion Matrix", fontweight="bold")
         ax.set_xlabel("Predicted")
         ax.set_ylabel("Actual")
