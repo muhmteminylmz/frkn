@@ -187,7 +187,7 @@ AUTOTUNE     = tf.data.AUTOTUNE
 MAX_FILTERS  = 512  # Her blokta 2x artan filtre sayısı için üst sınır
 MIN_SPATIAL_DROPOUT = 0.05
 MAX_SPATIAL_DROPOUT = 0.35
-RF_N_ESTIMATORS = 100  # Balance between Random Forest accuracy and training time
+RF_N_ESTIMATORS = 100  # Reduced from 300 to improve speed while preserving benchmark quality
 CLASS_LABELS = ["Organic", "Recyclable"]
 
 # Dataset cache (batch_size → (train_ds, val_ds, test_ds))
