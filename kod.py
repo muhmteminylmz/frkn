@@ -181,7 +181,7 @@ AUTOTUNE     = tf.data.AUTOTUNE
 MAX_FILTERS  = 512  # Her blokta 2x artan filtre sayısı için üst sınır
 MIN_SPATIAL_DROPOUT = 0.05
 MAX_SPATIAL_DROPOUT = 0.35
-RF_N_ESTIMATORS = 300  # Random Forest için doğruluk-eğitim süresi dengesi
+RF_N_ESTIMATORS = 300  # Balance between Random Forest accuracy and training time
 CLASS_LABELS = ["Organic", "Recyclable"]
 
 # Dataset cache (batch_size → (train_ds, val_ds, test_ds))
@@ -261,7 +261,7 @@ def flatten_binary_labels(y):
         return y
     if y.ndim == 2 and y.shape[1] == 1:
         return y[:, 0]
-    raise ValueError(f"Beklenmeyen etiket şekli: {y.shape}. Beklenen: (N,) veya (N,1)")
+    raise ValueError(f"Unexpected label shape: {y.shape}. Expected: (N,) or (N,1)")
 
 
 def flatten_and_normalize_images(x):
@@ -862,7 +862,7 @@ def plot_results(model_results):
     ]
     for ax, (model_name, result) in zip(cm_axes, model_results.items()):
         cm = np.asarray(result["metrics"]["confusion_matrix"])
-        sns.heatmap(cm, annot=True, fmt="d", cmap="viridis", cbar=False, ax=ax)
+        sns.heatmap(cm, annot=True, fmt="d", cmap="coolwarm", cbar=False, ax=ax)
         ax.set_title(f"{model_name}\nConfusion Matrix", fontweight="bold")
         ax.set_xlabel("Predicted")
         ax.set_ylabel("Actual")
