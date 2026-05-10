@@ -12,6 +12,7 @@ import random
 import warnings
 import numpy as np
 import matplotlib.pyplot as plt
+import seaborn as sns
 
 from dataclasses import dataclass, asdict
 
@@ -32,6 +33,21 @@ if GPU_MODE == "cpu":
 
 import tensorflow as tf
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from tensorflow.keras.applications import ResNet50
+from tensorflow.keras.applications.resnet50 import preprocess_input as resnet_preprocess_input
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    roc_auc_score,
+    roc_curve,
+    confusion_matrix,
+)
+from sklearn.svm import SVC
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
 
 # =========================================================
 # HIZLI TEST MODU
@@ -223,6 +239,49 @@ def create_datasets(batch_size, use_subset=QUICK_TEST):
     result = (train_ds, val_ds, test_ds)
     _gen_cache[cache_key] = result
     return result
+
+
+def dataset_to_numpy(ds):
+    """tf.data dataset'i numpy tensörlerine dönüştür."""
+    x_parts, y_parts = [], []
+    for xb, yb in ds:
+        x_parts.append(xb.numpy())
+        y_parts.append(yb.numpy().reshape(-1))
+    x = np.concatenate(x_parts, axis=0)
+    y = np.concatenate(y_parts, axis=0).astype(np.int32)
+    return x, y
+
+
+def compute_classification_metrics(y_true, y_prob):
+    """Binary sınıflandırma metriklerini hesapla."""
+    y_prob = np.asarray(y_prob).reshape(-1)
+    y_pred = (y_prob >= 0.5).astype(np.int32)
+    metrics = {
+        "accuracy": float(accuracy_score(y_true, y_pred)),
+        "precision": float(precision_score(y_true, y_pred, zero_division=0)),
+        "recall": float(recall_score(y_true, y_pred, zero_division=0)),
+        "f1_score": float(f1_score(y_true, y_pred, zero_division=0)),
+        "confusion_matrix": confusion_matrix(y_true, y_pred, labels=[0, 1]).tolist(),
+    }
+    try:
+        metrics["auc"] = float(roc_auc_score(y_true, y_prob))
+    except ValueError:
+        metrics["auc"] = float("nan")
+    return metrics
+
+
+def evaluate_keras_model(model, test_ds):
+    """Keras modeli için olasılık çıktıları ve metrikleri üret."""
+    y_true_parts, y_prob_parts = [], []
+    for xb, yb in test_ds:
+        probs = model.predict(xb, verbose=0).reshape(-1)
+        y_prob_parts.append(probs)
+        y_true_parts.append(yb.numpy().reshape(-1).astype(np.int32))
+
+    y_true = np.concatenate(y_true_parts, axis=0)
+    y_prob = np.concatenate(y_prob_parts, axis=0)
+    metrics = compute_classification_metrics(y_true, y_prob)
+    return y_true, y_prob, metrics
 
 
 # =========================================================
@@ -605,7 +664,10 @@ def final_evaluate_ghs_cnn(best_hp: HyperParams, epochs: int = 20):
     )
 
     test_loss, test_acc = model.evaluate(test_ds, verbose=0)
-    return model, test_loss, test_acc, history
+    y_true, y_prob, metrics = evaluate_keras_model(model, test_ds)
+    metrics["test_loss"] = float(test_loss)
+    metrics["test_accuracy_keras_eval"] = float(test_acc)
+    return model, history, y_true, y_prob, metrics
 
 
 # =========================================================
@@ -632,52 +694,172 @@ def final_evaluate_cnn_baseline(epochs: int = 15):
     )
 
     test_loss, test_acc = model.evaluate(test_ds, verbose=0)
-    return model, test_loss, test_acc, history
+    y_true, y_prob, metrics = evaluate_keras_model(model, test_ds)
+    metrics["test_loss"] = float(test_loss)
+    metrics["test_accuracy_keras_eval"] = float(test_acc)
+    return model, history, y_true, y_prob, metrics
+
+
+def build_resnet50_model() -> tf.keras.Model:
+    """ImageNet ağırlıklı ve dondurulmuş ResNet50 ile transfer learning modeli."""
+    inputs = tf.keras.Input(shape=(IMG_SIZE[0], IMG_SIZE[1], 3))
+    x = tf.keras.layers.Lambda(lambda t: tf.cast(t, tf.float32))(inputs)
+    x = tf.keras.layers.Lambda(resnet_preprocess_input)(x)
+    base_model = ResNet50(
+        include_top=False,
+        weights="imagenet",
+        input_shape=(IMG_SIZE[0], IMG_SIZE[1], 3),
+    )
+    base_model.trainable = False
+    x = base_model(x, training=False)
+    x = tf.keras.layers.GlobalAveragePooling2D()(x)
+    x = tf.keras.layers.Dropout(0.3)(x)
+    outputs = tf.keras.layers.Dense(1, activation="sigmoid", dtype="float32")(x)
+    model = tf.keras.Model(inputs, outputs)
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
+        loss="binary_crossentropy",
+        metrics=["accuracy"],
+    )
+    return model
+
+
+def final_evaluate_resnet50(epochs: int = 12):
+    """ResNet50 transfer learning modeli eğit ve değerlendir."""
+    print("\n🧠 RESNET50 (Transfer Learning) EĞİTİLİYOR...")
+    tf.keras.backend.clear_session()
+    _gen_cache.clear()
+    gc.collect()
+    train_ds, val_ds, test_ds = create_datasets(32, use_subset=False)
+
+    model = build_resnet50_model()
+    history = model.fit(
+        train_ds,
+        validation_data=val_ds,
+        epochs=epochs,
+        verbose=1,
+        callbacks=[
+            EarlyStopping(monitor="val_loss", patience=4, restore_best_weights=True),
+            ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=2, min_lr=1e-7, verbose=1),
+        ],
+    )
+
+    test_loss, test_acc = model.evaluate(test_ds, verbose=0)
+    y_true, y_prob, metrics = evaluate_keras_model(model, test_ds)
+    metrics["test_loss"] = float(test_loss)
+    metrics["test_accuracy_keras_eval"] = float(test_acc)
+    return model, history, y_true, y_prob, metrics
+
+
+def final_evaluate_sklearn_models():
+    """SVM ve Random Forest modellerini düzleştirilmiş görüntülerle eğit/değerlendir."""
+    print("\n🌲 SVM ve RANDOM FOREST EĞİTİLİYOR...")
+    train_ds, val_ds, test_ds = create_datasets(32, use_subset=False)
+
+    x_train, y_train = dataset_to_numpy(train_ds)
+    x_val, y_val = dataset_to_numpy(val_ds)
+    x_test, y_test = dataset_to_numpy(test_ds)
+
+    x_train = np.concatenate([x_train, x_val], axis=0)
+    y_train = np.concatenate([y_train, y_val], axis=0)
+
+    x_train = (x_train.reshape(x_train.shape[0], -1) / 255.0).astype(np.float32)
+    x_test = (x_test.reshape(x_test.shape[0], -1) / 255.0).astype(np.float32)
+
+    svm = make_pipeline(
+        StandardScaler(),
+        SVC(kernel="rbf", probability=True, random_state=42),
+    )
+    svm.fit(x_train, y_train)
+    svm_prob = svm.predict_proba(x_test)[:, 1]
+    svm_metrics = compute_classification_metrics(y_test, svm_prob)
+
+    rf = RandomForestClassifier(
+        n_estimators=300,
+        random_state=42,
+        n_jobs=-1,
+    )
+    rf.fit(x_train, y_train)
+    rf_prob = rf.predict_proba(x_test)[:, 1]
+    rf_metrics = compute_classification_metrics(y_test, rf_prob)
+
+    return {
+        "SVM": {"y_true": y_test, "y_prob": svm_prob, "metrics": svm_metrics},
+        "Random Forest": {"y_true": y_test, "y_prob": rf_prob, "metrics": rf_metrics},
+    }
 
 
 # =========================================================
 # 10. GRAFİKLER
 # =========================================================
-def plot_results(convergence, ghs_cnn_acc, baseline_acc):
-    """Yakınsama ve accuracy karşılaştırma grafiklerini çiz"""
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+def plot_results(model_results):
+    """Tek büyük figürde ROC, F1 bar ve model başına confusion matrix çiz."""
+    fig = plt.figure(figsize=(24, 16))
+    gs = fig.add_gridspec(3, 3)
 
-    # G-HS Yakınsama eğrisi
-    axes[0].plot(convergence, marker='o', linewidth=2, markersize=4, color='royalblue')
-    axes[0].set_title("G-HS Yakınsama Eğrisi (OBL + Dinamik PAR/BW)", fontsize=11, fontweight='bold')
-    axes[0].set_xlabel("İterasyon")
-    axes[0].set_ylabel("En İyi Validation Loss")
-    axes[0].grid(True, alpha=0.3)
+    ax_roc = fig.add_subplot(gs[0, :2])
+    ax_f1 = fig.add_subplot(gs[0, 2])
 
-    # İyileşme yüzdesi
-    improvement = [(convergence[0] - x) / convergence[0] * 100 for x in convergence]
-    axes[1].bar(range(len(improvement)), improvement, color='seagreen', alpha=0.75)
-    axes[1].set_title("G-HS İyileşme Yüzdesi", fontsize=11, fontweight='bold')
-    axes[1].set_xlabel("İterasyon")
-    axes[1].set_ylabel("İyileşme (%)")
-    axes[1].grid(True, alpha=0.3, axis='y')
+    for model_name, result in model_results.items():
+        y_true = np.asarray(result["y_true"]).astype(np.int32)
+        y_prob = np.asarray(result["y_prob"]).reshape(-1)
+        try:
+            fpr, tpr, _ = roc_curve(y_true, y_prob)
+            auc = result["metrics"]["auc"]
+            auc_txt = f"{auc:.4f}" if np.isfinite(auc) else "N/A"
+            ax_roc.plot(fpr, tpr, linewidth=2, label=f"{model_name} (AUC={auc_txt})")
+        except ValueError:
+            continue
 
-    # Test Accuracy karşılaştırması
-    labels = ['KLASİK CNN\n(Baseline)', 'G-HS-CNN\n(Önerilen)']
-    accs   = [baseline_acc * 100, ghs_cnn_acc * 100]
-    colors = ['#FF6B6B', '#4ECDC4']
-    bars   = axes[2].bar(labels, accs, color=colors, alpha=0.85, edgecolor='black', width=0.5)
-    axes[2].set_title("Test Accuracy Karşılaştırması", fontsize=11, fontweight='bold')
-    axes[2].set_ylabel("Test Accuracy (%)")
-    axes[2].set_ylim(max(0, min(accs) - 10), 102)
-    axes[2].grid(True, alpha=0.3, axis='y')
-    for bar, acc in zip(bars, accs):
-        axes[2].text(
-            bar.get_x() + bar.get_width() / 2.,
-            bar.get_height() + 0.3,
-            f'{acc:.2f}%',
-            ha='center', va='bottom', fontsize=11, fontweight='bold'
+    ax_roc.plot([0, 1], [0, 1], "k--", alpha=0.7)
+    ax_roc.set_title("Tüm Modeller için ROC Eğrileri", fontweight="bold")
+    ax_roc.set_xlabel("False Positive Rate")
+    ax_roc.set_ylabel("True Positive Rate")
+    ax_roc.grid(True, alpha=0.3)
+    ax_roc.legend(loc="lower right")
+
+    names = list(model_results.keys())
+    f1_values = [model_results[name]["metrics"]["f1_score"] for name in names]
+    bars = ax_f1.bar(names, f1_values, color=sns.color_palette("Set2", n_colors=len(names)))
+    ax_f1.set_title("Model Bazlı F1-Score Karşılaştırması", fontweight="bold")
+    ax_f1.set_ylabel("F1-Score")
+    ax_f1.set_ylim(0, 1.05)
+    ax_f1.grid(True, alpha=0.3, axis="y")
+    ax_f1.tick_params(axis="x", rotation=20)
+    for bar, val in zip(bars, f1_values):
+        ax_f1.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height() + 0.01,
+            f"{val:.3f}",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+            fontweight="bold",
         )
 
+    cm_axes = [
+        fig.add_subplot(gs[1, 0]),
+        fig.add_subplot(gs[1, 1]),
+        fig.add_subplot(gs[1, 2]),
+        fig.add_subplot(gs[2, 0]),
+        fig.add_subplot(gs[2, 1]),
+    ]
+    for ax, (model_name, result) in zip(cm_axes, model_results.items()):
+        cm = np.asarray(result["metrics"]["confusion_matrix"])
+        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", cbar=False, ax=ax)
+        ax.set_title(f"{model_name}\nConfusion Matrix", fontweight="bold")
+        ax.set_xlabel("Predicted")
+        ax.set_ylabel("Actual")
+        ax.set_xticklabels(["Organic(0)", "Recyclable(1)"], rotation=20)
+        ax.set_yticklabels(["Organic(0)", "Recyclable(1)"], rotation=0)
+
+    ax_empty = fig.add_subplot(gs[2, 2])
+    ax_empty.axis("off")
+
     plt.tight_layout()
-    plt.savefig("ghs_results.png", dpi=150)
+    plt.savefig("model_comparison_results.png", dpi=150)
     plt.close()
-    print("✓ Grafik kaydedildi: ghs_results.png")
+    print("✓ Grafik kaydedildi: model_comparison_results.png")
 
 
 # =========================================================
@@ -700,9 +882,9 @@ def run():
 
     # G-HS parametreleri: hızlı test ↔ tam çalıştırma
     if QUICK_TEST:
-        HMS, NI, epochs_opt, epochs_final, epochs_base = 5, 10, 2, 10, 8
+        HMS, NI, epochs_opt, epochs_final, epochs_base, epochs_resnet = 5, 10, 2, 10, 8, 8
     else:
-        HMS, NI, epochs_opt, epochs_final, epochs_base = 10, 30, 3, 20, 15
+        HMS, NI, epochs_opt, epochs_final, epochs_base, epochs_resnet = 10, 30, 3, 20, 15, 12
 
     try:
         # G-HS Optimizasyonu
@@ -733,40 +915,76 @@ def run():
         print(f"   • En İyi Val Loss: {best_solution['fitness']:.6f}")
         print("=" * 70)
 
+        model_results = {}
+
         # Final G-HS-CNN modeli
-        _, final_loss, final_acc, _ = final_evaluate_ghs_cnn(best_hp, epochs=epochs_final)
+        _, _, y_true, y_prob, ghs_metrics = final_evaluate_ghs_cnn(best_hp, epochs=epochs_final)
+        model_results["G-HS-CNN v2"] = {
+            "y_true": y_true,
+            "y_prob": y_prob,
+            "metrics": ghs_metrics,
+        }
 
         # Baseline CNN
-        _, baseline_loss, baseline_acc, _ = final_evaluate_cnn_baseline(epochs=epochs_base)
+        _, _, y_true, y_prob, baseline_metrics = final_evaluate_cnn_baseline(epochs=epochs_base)
+        model_results["Klasik CNN"] = {
+            "y_true": y_true,
+            "y_prob": y_prob,
+            "metrics": baseline_metrics,
+        }
 
-        # Grafik
-        plot_results(convergence, final_acc, baseline_acc)
+        # ResNet50 transfer learning
+        _, _, y_true, y_prob, resnet_metrics = final_evaluate_resnet50(epochs=epochs_resnet)
+        model_results["ResNet50"] = {
+            "y_true": y_true,
+            "y_prob": y_prob,
+            "metrics": resnet_metrics,
+        }
 
-        # Metrikler
-        loss_improvement = ((baseline_loss - final_loss) / baseline_loss) * 100
-        acc_improvement  = ((final_acc - baseline_acc) / baseline_acc) * 100
+        # SVM + Random Forest
+        model_results.update(final_evaluate_sklearn_models())
+
+        # Ortak görseller
+        plot_results(model_results)
 
         print("\n" + "=" * 70)
-        print("📈 TEST SONUÇLARI")
+        print("📈 TEST SONUÇLARI (5 MODEL)")
         print("=" * 70)
-
-        print("\n🎯 G-HS-CNN (Önerilen – Optimize Edilmiş)")
-        print(f"   Test Loss:     {final_loss:.6f}")
-        print(f"   Test Accuracy: {final_acc:.4f}  ({final_acc * 100:.2f}%)")
-
-        print("\n📊 KLASİK CNN (Baseline – Sabit Parametreler)")
-        print(f"   Test Loss:     {baseline_loss:.6f}")
-        print(f"   Test Accuracy: {baseline_acc:.4f}  ({baseline_acc * 100:.2f}%)")
-
-        print("\n🚀 İYİLEŞTİRME")
-        print(f"   Loss Azalması:   {loss_improvement:+.2f}%")
-        print(f"   Accuracy Artışı: {acc_improvement:+.2f}%")
+        for model_name, result in model_results.items():
+            m = result["metrics"]
+            auc_txt = f"{m['auc']:.4f}" if np.isfinite(m["auc"]) else "N/A"
+            print(f"\n🔹 {model_name}")
+            print(f"   Accuracy : {m['accuracy']:.4f}")
+            print(f"   Precision: {m['precision']:.4f}")
+            print(f"   Recall   : {m['recall']:.4f}")
+            print(f"   F1-Score : {m['f1_score']:.4f}")
+            print(f"   AUC      : {auc_txt}")
         print("=" * 70)
 
         # JSON kaydet
+        model_metrics_summary = {}
+        for model_name, result in model_results.items():
+            m = result["metrics"]
+            model_metrics_summary[model_name] = {
+                "accuracy": float(m["accuracy"]),
+                "precision": float(m["precision"]),
+                "recall": float(m["recall"]),
+                "f1_score": float(m["f1_score"]),
+                "auc": float(m["auc"]) if np.isfinite(m["auc"]) else None,
+                "confusion_matrix": m["confusion_matrix"],
+            }
+            if "test_loss" in m:
+                model_metrics_summary[model_name]["test_loss"] = float(m["test_loss"])
+
         summary = {
             "optimization_type": "G-HS + OBL + Dynamic PAR/BW",
-            "proposed_model":    "G-HS Optimized CNN",
+            "models_compared": [
+                "G-HS-CNN v2",
+                "Klasik CNN",
+                "ResNet50",
+                "SVM",
+                "Random Forest",
+            ],
             "dataset": (
                 f"Waste Classification ({DATASET_SIZE} images, {IMG_SIZE[0]}x{IMG_SIZE[1]})"
                 if DATASET_SIZE is not None
@@ -785,19 +1003,8 @@ def run():
                 "batch_size":    best_hp.batch_size,
                 "dense_units":   best_hp.dense_units,
             },
-            "ghs_cnn_results": {
-                "test_loss":             float(final_loss),
-                "test_accuracy":         float(final_acc),
-                "optimization_val_loss": float(best_solution["fitness"])
-            },
-            "baseline_cnn_results": {
-                "test_loss":     float(baseline_loss),
-                "test_accuracy": float(baseline_acc)
-            },
-            "improvements": {
-                "loss_reduction_pct":  float(loss_improvement),
-                "accuracy_gain_pct":   float(acc_improvement)
-            },
+            "optimization_val_loss": float(best_solution["fitness"]),
+            "metrics": model_metrics_summary,
             "convergence_history": [float(x) for x in convergence]
         }
 
@@ -805,7 +1012,7 @@ def run():
             json.dump(summary, f, indent=4, ensure_ascii=False)
 
         print("\n✓ Dosyalar kaydedildi:")
-        print("  • ghs_results.png")
+        print("  • model_comparison_results.png")
         print("  • summary.json")
 
     except Exception as e:
