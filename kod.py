@@ -296,12 +296,14 @@ def compute_classification_metrics(y_true, y_prob):
 
 def evaluate_keras_model(model, test_ds):
     """Keras modeli için olasılık çıktıları ve metrikleri üret."""
-    y_true_parts = []
-    for _, yb in test_ds:
+    y_true_parts, y_prob_parts = [], []
+    for xb, yb in test_ds:
+        probs = model(xb, training=False).numpy().reshape(-1)
+        y_prob_parts.append(probs)
         y_true_parts.append(flatten_binary_labels(yb.numpy()).astype(np.int32))
 
     y_true = np.concatenate(y_true_parts, axis=0)
-    y_prob = model.predict(test_ds, verbose=0).reshape(-1)
+    y_prob = np.concatenate(y_prob_parts, axis=0)
     metrics = compute_classification_metrics(y_true, y_prob)
     return y_true, y_prob, metrics
 
