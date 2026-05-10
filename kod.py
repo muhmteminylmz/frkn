@@ -298,7 +298,7 @@ def evaluate_keras_model(model, test_ds):
     """Keras modeli için olasılık çıktıları ve metrikleri üret."""
     y_true_parts, y_prob_parts = [], []
     for xb, yb in test_ds:
-        probs = model(xb, training=False).numpy().reshape(-1)
+        probs = model.predict_on_batch(xb).reshape(-1)
         y_prob_parts.append(probs)
         y_true_parts.append(flatten_binary_labels(yb.numpy()).astype(np.int32))
 
