@@ -201,6 +201,7 @@ TRAIN_RATIO = 0.70
 VAL_RATIO = 0.15
 TEST_RATIO = 0.15
 VALID_IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp")
+MAX_SHUFFLE_BUFFER = 10_000
 _dataset_file_count_cache = None
 
 
@@ -223,7 +224,10 @@ def get_total_image_count():
 def compute_split_sizes(total_count):
     """Toplam örnek sayısını sabit 70/15/15 oranına böl."""
     if total_count < 7:
-        raise ValueError("70/15/15 bölmesi ve boş olmayan alt kümeler için en az 7 görüntü gerekli.")
+        raise ValueError(
+            "70/15/15 bölmesi için en az 7 görüntü gerekli "
+            "(boş olmayan alt kümeler: train≥1, val≥1, test≥1)."
+        )
     train_n = int(total_count * TRAIN_RATIO)
     val_n = int(total_count * VAL_RATIO)
     test_n = total_count - train_n - val_n
@@ -256,7 +260,8 @@ def create_datasets(batch_size, use_subset=QUICK_TEST):
     if train_pool_ds.class_names != test_pool_ds.class_names:
         raise ValueError(
             "TRAIN_DIR ve TEST_DIR class isimleri farklı; 70/15/15 birleştirme yapılamadı. "
-            f"TRAIN_DIR classes={train_pool_ds.class_names}, TEST_DIR classes={test_pool_ds.class_names}"
+            f"TRAIN_DIR classes={train_pool_ds.class_names}, TEST_DIR classes={test_pool_ds.class_names}. "
+            "Her iki dizinde de aynı class alt klasörlerinin bulunduğunu doğrulayın."
         )
 
     all_ds = train_pool_ds.concatenate(test_pool_ds).unbatch()
@@ -270,7 +275,7 @@ def create_datasets(batch_size, use_subset=QUICK_TEST):
         target_total = total_images
 
     train_n, val_n, test_n = compute_split_sizes(target_total)
-    shuffle_buffer = min(total_images, 10_000)
+    shuffle_buffer = min(total_images, MAX_SHUFFLE_BUFFER)
     all_ds = all_ds.shuffle(shuffle_buffer, seed=42, reshuffle_each_iteration=False).take(target_total)
 
     train_ds = all_ds.take(train_n).batch(batch_size)
