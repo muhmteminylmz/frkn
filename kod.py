@@ -63,6 +63,7 @@ QUICK_TEST = False
 #          Örnek: DATASET_SIZE = 5000  → 3500 eğitim + 750 doğrulama + 750 test
 #          Geçerli aralık: 500 – 22500
 # Tüm veri havuzu TRAIN_DIR + TEST_DIR üzerinden birleştirilip 70/15/15 bölünür.
+# Not: 70/15/15 oranını tam korumak için toplam örnek sayısı 20'nin katına normalize edilir.
 # =========================================================
 DATASET_SIZE = None   # Örnek: 5000, 10000, None (otomatik)
 
@@ -223,20 +224,34 @@ def get_total_image_count():
 
 def compute_split_sizes(total_count):
     """Toplam örnek sayısını sabit 70/15/15 oranına böl."""
-    if total_count < 7:
+    if total_count < 20:
         raise ValueError(
-            "70/15/15 bölmesi için en az 7 görüntü gerekli "
+            "70/15/15 bölmesi için en az 20 görüntü gerekli "
             "(boş olmayan alt kümeler: train≥1, val≥1, test≥1)."
         )
-    train_n = int(total_count * TRAIN_RATIO)
-    val_n = int(total_count * VAL_RATIO)
-    test_n = total_count - train_n - val_n
+    train_n = (total_count * 70) // 100
+    val_n = (total_count * 15) // 100
+    test_n = (total_count * 15) // 100
     if min(train_n, val_n, test_n) < 1:
         raise ValueError(
             f"Geçersiz 70/15/15 bölmesi: total={total_count}, "
             f"train={train_n}, val={val_n}, test={test_n}"
         )
+    if train_n + val_n + test_n != total_count:
+        raise ValueError(
+            f"70/15/15 için toplam örnek sayısı 20'nin katı olmalı: total={total_count}"
+        )
     return train_n, val_n, test_n
+
+
+def normalize_total_for_split(total_count):
+    """70/15/15 oranını tam sağlamak için toplamı 20'nin katına indir."""
+    normalized = total_count - (total_count % 20)
+    if normalized < 20:
+        raise ValueError(
+            f"70/15/15 bölmesi için yeterli örnek yok: raw_total={total_count}, normalized={normalized}"
+        )
+    return normalized
 
 
 def create_datasets(batch_size, use_subset=QUICK_TEST):
@@ -268,11 +283,13 @@ def create_datasets(batch_size, use_subset=QUICK_TEST):
     total_images = get_total_image_count()
 
     if DATASET_SIZE is not None:
-        target_total = min(DATASET_SIZE, total_images)
+        raw_target_total = min(DATASET_SIZE, total_images)
     elif use_subset:
-        target_total = min(QUICK_TEST_TOTAL, total_images)
+        raw_target_total = min(QUICK_TEST_TOTAL, total_images)
     else:
-        target_total = total_images
+        raw_target_total = total_images
+
+    target_total = normalize_total_for_split(raw_target_total)
 
     train_n, val_n, test_n = compute_split_sizes(target_total)
     shuffle_buffer = min(total_images, MAX_SHUFFLE_BUFFER)
@@ -747,11 +764,11 @@ def final_evaluate_ghs_cnn(best_hp: HyperParams, epochs: int = 35):
     model = build_cnn_model(best_hp)
 
     if DATASET_SIZE is not None:
-        n_train = int(DATASET_SIZE * TRAIN_RATIO)
+        n_train, _, _ = compute_split_sizes(normalize_total_for_split(DATASET_SIZE))
     elif QUICK_TEST:
-        n_train = int(min(QUICK_TEST_TOTAL, get_total_image_count()) * TRAIN_RATIO)
+        n_train, _, _ = compute_split_sizes(normalize_total_for_split(min(QUICK_TEST_TOTAL, get_total_image_count())))
     else:
-        n_train = int(get_total_image_count() * TRAIN_RATIO)
+        n_train, _, _ = compute_split_sizes(normalize_total_for_split(get_total_image_count()))
     total_steps  = epochs * max(n_train // best_hp.batch_size, 1)
     cosine_lr    = tf.keras.optimizers.schedules.CosineDecayRestarts(
         initial_learning_rate=best_hp.learning_rate,
@@ -1041,11 +1058,13 @@ def run():
     print("🎯 G-HS + OBL + DİNAMİK PAR/BW ile CNN HİPERPARAMETRE OPTİMİZASYONU (v2)")
     print(f"Dataset: Waste Classification (Organic vs Recyclable, toplam {get_total_image_count()} görüntü)")
     if DATASET_SIZE is not None:
-        train_n, val_n, test_n = compute_split_sizes(DATASET_SIZE)
-        print(f"📊 VERİ BOYUTU: {DATASET_SIZE} görüntü kullanılacak "
+        normalized_total = normalize_total_for_split(DATASET_SIZE)
+        train_n, val_n, test_n = compute_split_sizes(normalized_total)
+        print(f"📊 VERİ BOYUTU: {normalized_total} görüntü kullanılacak "
               f"(Eğitim ≈ {train_n}, Doğrulama ≈ {val_n}, Test ≈ {test_n}), IMG={IMG_SIZE}")
     elif QUICK_TEST:
-        train_n, val_n, test_n = compute_split_sizes(min(QUICK_TEST_TOTAL, get_total_image_count()))
+        normalized_total = normalize_total_for_split(min(QUICK_TEST_TOTAL, get_total_image_count()))
+        train_n, val_n, test_n = compute_split_sizes(normalized_total)
         print(f"⚡ HIZLI TEST MODU: IMG={IMG_SIZE}, Eğitim={train_n}, Val={val_n}, Test={test_n} örnek")
     print("=" * 70)
 
@@ -1152,15 +1171,18 @@ def run():
             "optimization_type": "G-HS + OBL + Dynamic PAR/BW",
             "models_compared": ["G-HS-CNN v2", "Klasik CNN", "ResNet50", "MLP", "SVM", "Random Forest"],
             "dataset": (
-                f"Waste Classification ({DATASET_SIZE} images, {IMG_SIZE[0]}x{IMG_SIZE[1]})"
+                f"Waste Classification ({normalize_total_for_split(DATASET_SIZE)} images, 70/15/15, {IMG_SIZE[0]}x{IMG_SIZE[1]})"
                 if DATASET_SIZE is not None
                 else (
                     (
                         f"Waste Classification (QUICK_TEST 70/15/15, "
-                        f"total={min(QUICK_TEST_TOTAL, get_total_image_count())}, {IMG_SIZE[0]}x{IMG_SIZE[1]})"
+                        f"total={normalize_total_for_split(min(QUICK_TEST_TOTAL, get_total_image_count()))}, {IMG_SIZE[0]}x{IMG_SIZE[1]})"
                     )
                     if QUICK_TEST
-                    else f"Waste Classification ({get_total_image_count()} images, 70/15/15, {IMG_SIZE[0]}x{IMG_SIZE[1]})"
+                    else (
+                        f"Waste Classification ({normalize_total_for_split(get_total_image_count())} images, "
+                        f"70/15/15, {IMG_SIZE[0]}x{IMG_SIZE[1]})"
+                    )
                 )
             ),
             "best_hyperparameters": {
