@@ -96,9 +96,9 @@ Kaynaklar (proje kök dizinine göre relatif yollar):
 - `dataset/test`
 
 İşleyiş:
-1. `image_dataset_from_directory` ile train/val (`validation_split=0.05`) üretilir.
-2. Test seti ayrı dizinden yüklenir.
-3. `QUICK_TEST` veya `DATASET_SIZE` ile örnek sayısı kısıtlanabilir.
+1. `dataset/train` + `dataset/test` veri havuzu birleştirilir.
+2. Nihai bölme **zorunlu** olarak `train=70%`, `validation=15%`, `test=15%` yapılır.
+3. `QUICK_TEST` veya `DATASET_SIZE` ile toplam örnek sayısı kısıtlanabilir (oranlar korunur).
 4. Batch-size bazlı cache kullanılır (`_gen_cache`).
 5. `prefetch(AUTOTUNE)` ile pipeline hızlandırılır.
 
