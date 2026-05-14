@@ -210,7 +210,7 @@ def count_image_files(root_dir):
     """Verilen dizin altında desteklenen uzantılardaki görüntü dosyalarını say."""
     total = 0
     for dirpath, _, filenames in os.walk(root_dir):
-        total += sum(name.lower().endswith(VALID_IMAGE_EXTENSIONS) for name in filenames)
+        total += sum(os.path.splitext(name)[1].lower() in VALID_IMAGE_EXTENSIONS for name in filenames)
     return total
 
 
@@ -239,7 +239,7 @@ def compute_split_sizes(total_count):
         )
     if train_n + val_n + test_n != total_count:
         raise ValueError(
-            f"70/15/15 için toplam örnek sayısı 20'nin katı olmalı: total={total_count}"
+            f"İç tutarlılık hatası: total={total_count} için 70/15/15 toplamı korunamadı."
         )
     return train_n, val_n, test_n
 
@@ -256,7 +256,16 @@ def normalize_total_for_split(total_count):
 
 def create_datasets(batch_size, use_subset=QUICK_TEST):
     """tf.data pipeline ile veri yükle (batch_size ve veri boyutuna göre cache'li)"""
-    cache_key = (batch_size, DATASET_SIZE if DATASET_SIZE is not None else ("quick" if use_subset else "full"))
+    total_images = get_total_image_count()
+    if DATASET_SIZE is not None:
+        raw_target_total = min(DATASET_SIZE, total_images)
+    elif use_subset:
+        raw_target_total = min(QUICK_TEST_TOTAL, total_images)
+    else:
+        raw_target_total = total_images
+    target_total = normalize_total_for_split(raw_target_total)
+
+    cache_key = (batch_size, target_total)
     if cache_key in _gen_cache:
         return _gen_cache[cache_key]
 
@@ -274,24 +283,15 @@ def create_datasets(batch_size, use_subset=QUICK_TEST):
     test_pool_ds = tf.keras.utils.image_dataset_from_directory(TEST_DIR, shuffle=True, **common)
     if train_pool_ds.class_names != test_pool_ds.class_names:
         raise ValueError(
-            "TRAIN_DIR ve TEST_DIR class isimleri farklı; 70/15/15 birleştirme yapılamadı. "
+            "TRAIN_DIR ve TEST_DIR sınıf isimleri farklı; 70/15/15 birleştirme yapılamadı. "
             f"TRAIN_DIR classes={train_pool_ds.class_names}, TEST_DIR classes={test_pool_ds.class_names}. "
             "Her iki dizinde de aynı class alt klasörlerinin bulunduğunu doğrulayın."
         )
 
     all_ds = train_pool_ds.concatenate(test_pool_ds).unbatch()
-    total_images = get_total_image_count()
-
-    if DATASET_SIZE is not None:
-        raw_target_total = min(DATASET_SIZE, total_images)
-    elif use_subset:
-        raw_target_total = min(QUICK_TEST_TOTAL, total_images)
-    else:
-        raw_target_total = total_images
-
-    target_total = normalize_total_for_split(raw_target_total)
 
     train_n, val_n, test_n = compute_split_sizes(target_total)
+    # Sabit seed + reshuffle_each_iteration=False: alt küme seçimi tekrar üretilebilir olur.
     shuffle_buffer = min(total_images, MAX_SHUFFLE_BUFFER)
     all_ds = all_ds.shuffle(shuffle_buffer, seed=42, reshuffle_each_iteration=False).take(target_total)
 
