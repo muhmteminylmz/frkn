@@ -54,7 +54,7 @@ from sklearn.preprocessing import StandardScaler
 # QUICK_TEST = True  → küçük veri alt kümesi (hızlı doğrulama)
 # QUICK_TEST = False → tüm 22k veri (tam çalıştırma)
 # =========================================================
-QUICK_TEST = True
+QUICK_TEST = False
 
 # =========================================================
 # VERİ BOYUTU (opsiyonel – DATASET_SIZE)
@@ -218,12 +218,12 @@ def create_datasets(batch_size, use_subset=QUICK_TEST):
     # tf.data pipeline [0, 255] ham piksel değeri döndürür;
     # normalizasyon (Rescaling) modelin içinde yapılır.
     train_ds = tf.keras.utils.image_dataset_from_directory(
-        TRAIN_DIR, validation_split=0.2, subset="training",
+        TRAIN_DIR, validation_split=0.05, subset="training",
         shuffle=True, **common
     )
 
     val_ds = tf.keras.utils.image_dataset_from_directory(
-        TRAIN_DIR, validation_split=0.2, subset="validation",
+        TRAIN_DIR, validation_split=0.05, subset="validation",
         shuffle=True, **common
     )
 
@@ -233,7 +233,7 @@ def create_datasets(batch_size, use_subset=QUICK_TEST):
 
     # Veri alt kümesi: DATASET_SIZE önceliklidir, yoksa use_subset kontrolü yapılır
     if DATASET_SIZE is not None:
-        train_n = int(DATASET_SIZE * 0.8)
+        train_n = int(DATASET_SIZE * 0.95)
         val_n   = DATASET_SIZE - train_n
         train_ds = train_ds.unbatch().shuffle(train_n * 3, seed=42).take(train_n).batch(batch_size)
         val_ds   = val_ds.unbatch().shuffle(val_n * 3, seed=42).take(val_n).batch(batch_size)
@@ -683,23 +683,71 @@ def ghs_optimize(
 # =========================================================
 # 8. FINAL EĞİTİM – G-HS CNN (Önerilen Model)
 # =========================================================
-def final_evaluate_ghs_cnn(best_hp: HyperParams, epochs: int = 20):
-    """G-HS tarafından bulunan optimum hiperparametrelerle CNN final eğitimi"""
+def final_evaluate_ghs_cnn(best_hp: HyperParams, epochs: int = 35):
     print("\n🔧 FINAL G-HS-CNN MODELİ EĞİTİLİYOR...")
     tf.keras.backend.clear_session()
     _gen_cache.clear()
     gc.collect()
-    train_ds, val_ds, test_ds = create_datasets(best_hp.batch_size, use_subset=False)
+
+    common = dict(
+        image_size=IMG_SIZE,
+        batch_size=best_hp.batch_size,
+        label_mode='binary',
+        seed=42,
+    )
+
+    train_ds = tf.keras.utils.image_dataset_from_directory(
+        TRAIN_DIR, validation_split=0.05, subset="training",
+        shuffle=True, **common
+    )
+    val_ds = tf.keras.utils.image_dataset_from_directory(
+        TRAIN_DIR, validation_split=0.05, subset="validation",
+        shuffle=False, **common
+    )
+    test_ds = tf.keras.utils.image_dataset_from_directory(
+        TEST_DIR, shuffle=False, **common
+    )
+
+    if DATASET_SIZE is not None:
+        train_n = int(DATASET_SIZE * 0.95)
+        val_n   = DATASET_SIZE - train_n
+        train_ds = train_ds.unbatch().shuffle(train_n * 3, seed=42).take(train_n).batch(best_hp.batch_size)
+        val_ds   = val_ds.unbatch().shuffle(val_n * 3, seed=42).take(val_n).batch(best_hp.batch_size)
+
+    def mixup(images, labels, alpha=0.2):
+        lam = tf.random.uniform([], 0.0, alpha)
+        idx = tf.random.shuffle(tf.range(tf.shape(images)[0]))
+        return (lam * images + (1 - lam) * tf.gather(images, idx),
+                lam * labels + (1 - lam) * tf.gather(labels, idx))
+
+    train_ds = train_ds.map(lambda x, y: mixup(x, y), num_parallel_calls=tf.data.AUTOTUNE)
+    train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
+    val_ds   = val_ds.prefetch(tf.data.AUTOTUNE)
+    test_ds  = test_ds.prefetch(tf.data.AUTOTUNE)
 
     model = build_cnn_model(best_hp)
+
+    n_train      = int(DATASET_SIZE * 0.95) if DATASET_SIZE else int(22564 * 0.95)
+    total_steps  = epochs * max(n_train // best_hp.batch_size, 1)
+    cosine_lr    = tf.keras.optimizers.schedules.CosineDecayRestarts(
+        initial_learning_rate=best_hp.learning_rate,
+        first_decay_steps=max(total_steps // 3, 200),
+        t_mul=1.5, m_mul=0.9, alpha=1e-6,
+    )
+
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=cosine_lr),
+        loss=tf.keras.losses.BinaryCrossentropy(label_smoothing=0.05),
+        metrics=['accuracy']
+    )
 
     history = model.fit(
         train_ds, validation_data=val_ds,
         epochs=epochs,
         verbose=1,
         callbacks=[
-            EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True),
-            ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=3, min_lr=1e-7, verbose=1),
+            EarlyStopping(monitor="val_loss", patience=7, restore_best_weights=True),
+            ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=4, min_lr=1e-7, verbose=1),
         ]
     )
 
@@ -708,7 +756,6 @@ def final_evaluate_ghs_cnn(best_hp: HyperParams, epochs: int = 20):
     metrics["test_loss"] = float(test_loss)
     metrics["test_accuracy_keras_eval"] = float(test_acc)
     return model, history, y_true, y_prob, metrics
-
 
 # =========================================================
 # 9. FINAL EĞİTİM – CNN BASELINE
@@ -807,8 +854,9 @@ def final_evaluate_sklearn_models():
 
     svm = make_pipeline(
         StandardScaler(),
-        SVC(kernel="linear", probability=True, random_state=42),
+        SVC(kernel="rbf", probability=True, random_state=42, max_iter=2000), # Sınır
     )
+
     svm.fit(x_train, y_train)
     svm_prob = svm.predict_proba(x_test)[:, 1]
     svm_metrics = compute_classification_metrics(y_test, svm_prob)
@@ -826,7 +874,67 @@ def final_evaluate_sklearn_models():
         "SVM": {"y_true": y_test, "y_prob": svm_prob, "metrics": svm_metrics},
         "Random Forest": {"y_true": y_test, "y_prob": rf_prob, "metrics": rf_metrics},
     }
+def build_mlp_model(input_dim: int) -> tf.keras.Model:
+    """
+    Düzleştirilmiş piksel girişi üzerinde MLP.
+    Keras ile eğitilir → olasılık çıktısı üretir (SVM/RF gibi).
+    """
+    inp = tf.keras.Input(shape=(input_dim,))
+    x   = tf.keras.layers.Dense(512, activation='relu')(inp)
+    x   = tf.keras.layers.BatchNormalization()(x)
+    x   = tf.keras.layers.Dropout(0.4)(x)
+    x   = tf.keras.layers.Dense(256, activation='relu')(x)
+    x   = tf.keras.layers.BatchNormalization()(x)
+    x   = tf.keras.layers.Dropout(0.3)(x)
+    x   = tf.keras.layers.Dense(128, activation='relu')(x)
+    x   = tf.keras.layers.Dropout(0.2)(x)
+    out = tf.keras.layers.Dense(1, activation='sigmoid')(x)
+    model = tf.keras.Model(inp, out)
+    model.compile(optimizer=tf.keras.optimizers.Adam(1e-3),
+                  loss='binary_crossentropy', metrics=['accuracy'])
+    return model
 
+
+def final_evaluate_mlp(epochs: int = 20):
+    """MLP: 32×32 düzleştirilmiş görüntülerle eğit."""
+    print("\n🔷 MLP EĞİTİLİYOR...")
+    train_ds, val_ds, test_ds = create_datasets(32, use_subset=False)
+
+    x_train, y_train = dataset_to_numpy_small(train_ds)
+    x_val,   y_val   = dataset_to_numpy_small(val_ds)
+    x_test,  y_test  = dataset_to_numpy_small(test_ds)
+
+    # Val'i de eğitime ekle (küçük val seti, tam veri kullanımı)
+    x_tr = np.concatenate([x_train, x_val], axis=0)
+    y_tr = np.concatenate([y_train, y_val], axis=0)
+
+    x_tr   = flatten_and_normalize_images(x_tr)
+    x_test = flatten_and_normalize_images(x_test)
+
+    tf.keras.backend.clear_session()
+    model = build_mlp_model(x_tr.shape[1])
+
+    # Numpy array → tf.data (EarlyStopping için kendi val setini oluştur)
+    val_split = int(len(x_tr) * 0.05)
+    x_val_mlp, y_val_mlp = x_tr[:val_split], y_tr[:val_split]
+    x_tr_mlp,  y_tr_mlp  = x_tr[val_split:],  y_tr[val_split:]
+
+    model.fit(
+        x_tr_mlp, y_tr_mlp,
+        validation_data=(x_val_mlp, y_val_mlp),
+        epochs=epochs, batch_size=128, verbose=0,
+        callbacks=[
+            EarlyStopping('val_loss', patience=5, restore_best_weights=True),
+            ReduceLROnPlateau('val_loss', factor=0.5, patience=3,
+                              min_lr=1e-6, verbose=0),
+        ]
+    )
+
+    y_prob = model.predict(x_test, verbose=0).flatten()
+    metrics = compute_classification_metrics(y_test, y_prob)
+    print(f"  MLP → F1:{metrics['f1_score']:.4f}  "
+          f"Acc:{metrics['accuracy']:.4f}  AUC:{metrics['auc']:.4f}")
+    return y_test, y_prob, metrics
 
 # =========================================================
 # 10. GRAFİKLER
@@ -882,6 +990,7 @@ def plot_results(model_results):
         fig.add_subplot(gs[1, 2]),
         fig.add_subplot(gs[2, 0]),
         fig.add_subplot(gs[2, 1]),
+        fig.add_subplot(gs[2, 2]),
     ]
     for ax, (model_name, result) in zip(cm_axes, model_results.items()):
         cm = np.asarray(result["metrics"]["confusion_matrix"])
@@ -980,9 +1089,12 @@ def run():
             "metrics": resnet_metrics,
         }
 
+        y_true, y_prob, mlp_metrics = final_evaluate_mlp(epochs=20)
+        model_results["MLP"] = {"y_true": y_true, "y_prob": y_prob, "metrics": mlp_metrics}
+
         # SVM + Random Forest
         model_results.update(final_evaluate_sklearn_models())
-
+        
         # Ortak görseller
         plot_results(model_results)
 
@@ -1017,13 +1129,7 @@ def run():
 
         summary = {
             "optimization_type": "G-HS + OBL + Dynamic PAR/BW",
-            "models_compared": [
-                "G-HS-CNN v2",
-                "Klasik CNN",
-                "ResNet50",
-                "SVM",
-                "Random Forest",
-            ],
+            "models_compared": ["G-HS-CNN v2", "Klasik CNN", "ResNet50", "MLP", "SVM", "Random Forest"],
             "dataset": (
                 f"Waste Classification ({DATASET_SIZE} images, {IMG_SIZE[0]}x{IMG_SIZE[1]})"
                 if DATASET_SIZE is not None
