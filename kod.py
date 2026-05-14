@@ -1001,9 +1001,6 @@ def plot_results(model_results):
         ax.set_xticklabels(CLASS_LABELS, rotation=20)
         ax.set_yticklabels(CLASS_LABELS, rotation=0)
 
-    ax_empty = fig.add_subplot(gs[2, 2])
-    ax_empty.axis("off")
-
     plt.tight_layout()
     plt.savefig("model_comparison_results.png", dpi=150)
     plt.close()
@@ -1020,7 +1017,7 @@ def run():
     print("🎯 G-HS + OBL + DİNAMİK PAR/BW ile CNN HİPERPARAMETRE OPTİMİZASYONU (v2)")
     print("Dataset: Waste Classification (Organic vs Recyclable, 22500 görüntü)")
     if DATASET_SIZE is not None:
-        train_n = int(DATASET_SIZE * 0.8)
+        train_n = int(DATASET_SIZE * 0.95)
         val_n   = DATASET_SIZE - train_n
         print(f"📊 VERİ BOYUTU: {DATASET_SIZE} görüntü kullanılacak "
               f"(Eğitim ≈ {train_n}, Doğrulama ≈ {val_n}), IMG={IMG_SIZE}")
@@ -1099,7 +1096,7 @@ def run():
         plot_results(model_results)
 
         print("\n" + "=" * 70)
-        print("📈 TEST SONUÇLARI (5 MODEL)")
+        print("📈 TEST SONUÇLARI (6 MODEL)")
         print("=" * 70)
         for model_name, result in model_results.items():
             m = result["metrics"]
