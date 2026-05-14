@@ -237,6 +237,11 @@ def compute_split_sizes(total_count):
             f"Geçersiz 70/15/15 bölmesi: total={total_count}, "
             f"train={train_n}, val={val_n}, test={test_n}"
         )
+    if train_n + val_n + test_n != total_count:
+        raise ValueError(
+            f"70/15/15 bölmesi toplamı tutarsız: total={total_count}, "
+            f"train={train_n}, val={val_n}, test={test_n}"
+        )
     return train_n, val_n, test_n
 
 
@@ -285,8 +290,8 @@ def create_datasets(batch_size, use_subset=QUICK_TEST):
             f"TRAIN_DIR classes={train_classes}, TEST_DIR classes={test_classes}. "
             "Her iki dizinde de aynı sınıf alt klasörlerinin bulunduğunu doğrulayın."
         )
-    if train_classes != test_classes:
-        canonical_classes = sorted(train_classes)
+    canonical_classes = sorted(train_classes)
+    if train_classes != canonical_classes or test_classes != canonical_classes:
         train_pool_ds = tf.keras.utils.image_dataset_from_directory(
             TRAIN_DIR, shuffle=True, class_names=canonical_classes, **common
         )
@@ -298,6 +303,7 @@ def create_datasets(batch_size, use_subset=QUICK_TEST):
 
     train_n, val_n, test_n = compute_split_sizes(target_total)
     # Sabit seed + reshuffle_each_iteration=False: alt küme seçimi tekrar üretilebilir olur.
+    # MAX_SHUFFLE_BUFFER sınırı bellek kullanımını dengeler.
     shuffle_buffer = min(target_total, MAX_SHUFFLE_BUFFER)
     all_ds = all_ds.shuffle(shuffle_buffer, seed=42, reshuffle_each_iteration=False).take(target_total)
 
