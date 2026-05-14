@@ -60,9 +60,10 @@ QUICK_TEST = False
 # VERİ BOYUTU (opsiyonel – DATASET_SIZE)
 # None  → QUICK_TEST/FULL moduna göre otomatik (2000 veya tüm veri)
 # int   → Tam veri setinden seçilecek toplam görüntü sayısı
-#          Örnek: DATASET_SIZE = 5000  → 4000 eğitim + 1000 doğrulama
+#          Örnek: DATASET_SIZE = 5000  → 3500 eğitim + 750 doğrulama + 750 test
 #          Geçerli aralık: 500 – 22500
-# Test seti her zaman ayrı TEST_DIR dizininden yüklenir (değişmez).
+# Tüm veri havuzu TRAIN_DIR + TEST_DIR üzerinden birleştirilip 70/15/15 bölünür.
+# Not: 70/15/15 oranını tam korumak için toplam örnek sayısı 20'nin katına normalize edilir.
 # =========================================================
 DATASET_SIZE = None   # Örnek: 5000, 10000, None (otomatik)
 
@@ -196,13 +197,76 @@ _gen_cache = {}
 # Hızlı test modu ayarları
 IMG_SIZE = (64, 64) if QUICK_TEST else (128, 128)
 ML_IMG_SIZE = (32, 32)
-TRAIN_SUBSET = 2000   # QUICK_TEST=True iken kullanılacak eğitim örnek sayısı
-VAL_SUBSET   = 500    # QUICK_TEST=True iken kullanılacak doğrulama örnek sayısı
+QUICK_TEST_TOTAL = 3000  # QUICK_TEST=True iken toplam örnek sayısı (70/15/15 uygulanır)
+TRAIN_RATIO = 0.70
+VAL_RATIO = 0.15
+TEST_RATIO = 0.15
+VALID_IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp")
+MAX_SHUFFLE_BUFFER = 10_000
+_dataset_file_count_cache = None
+
+
+def count_image_files(root_dir):
+    """Verilen dizin altında desteklenen uzantılardaki görüntü dosyalarını say."""
+    total = 0
+    for dirpath, _, filenames in os.walk(root_dir):
+        total += sum(name.lower().endswith(VALID_IMAGE_EXTENSIONS) for name in filenames)
+    return total
+
+
+def get_total_image_count():
+    """TRAIN_DIR + TEST_DIR toplam görüntü sayısını cache'li döndür."""
+    global _dataset_file_count_cache
+    if _dataset_file_count_cache is None:
+        _dataset_file_count_cache = count_image_files(TRAIN_DIR) + count_image_files(TEST_DIR)
+    return _dataset_file_count_cache
+
+
+def compute_split_sizes(total_count):
+    """Toplam örnek sayısını sabit 70/15/15 oranına böl."""
+    if total_count < 20:
+        raise ValueError(
+            "70/15/15 bölmesi için en az 20 görüntü gerekli "
+            "(boş olmayan alt kümeler: train≥1, val≥1, test≥1)."
+        )
+    train_n = (total_count * 70) // 100
+    val_n = (total_count * 15) // 100
+    test_n = (total_count * 15) // 100
+    if min(train_n, val_n, test_n) < 1:
+        raise ValueError(
+            f"Geçersiz 70/15/15 bölmesi: total={total_count}, "
+            f"train={train_n}, val={val_n}, test={test_n}"
+        )
+    if train_n + val_n + test_n != total_count:
+        raise ValueError(
+            f"70/15/15 bölmesi toplamı tutarsız: total={total_count}, "
+            f"train={train_n}, val={val_n}, test={test_n}"
+        )
+    return train_n, val_n, test_n
+
+
+def normalize_total_for_split(total_count):
+    """70/15/15 oranını tam sağlamak için toplamı 20'nin katına indir."""
+    normalized = total_count - (total_count % 20)
+    if normalized < 20:
+        raise ValueError(
+            f"70/15/15 bölmesi için yeterli örnek yok: raw_total={total_count}, normalized={normalized}"
+        )
+    return normalized
 
 
 def create_datasets(batch_size, use_subset=QUICK_TEST):
     """tf.data pipeline ile veri yükle (batch_size ve veri boyutuna göre cache'li)"""
-    cache_key = (batch_size, DATASET_SIZE if DATASET_SIZE is not None else use_subset)
+    total_images = get_total_image_count()
+    if DATASET_SIZE is not None:
+        raw_target_total = min(DATASET_SIZE, total_images)
+    elif use_subset:
+        raw_target_total = min(QUICK_TEST_TOTAL, total_images)
+    else:
+        raw_target_total = total_images
+    target_total = normalize_total_for_split(raw_target_total)
+
+    cache_key = (batch_size, target_total)
     if cache_key in _gen_cache:
         return _gen_cache[cache_key]
 
@@ -215,31 +279,38 @@ def create_datasets(batch_size, use_subset=QUICK_TEST):
         seed=42,
     )
 
-    # tf.data pipeline [0, 255] ham piksel değeri döndürür;
-    # normalizasyon (Rescaling) modelin içinde yapılır.
-    train_ds = tf.keras.utils.image_dataset_from_directory(
-        TRAIN_DIR, validation_split=0.05, subset="training",
-        shuffle=True, **common
-    )
+    # 70/15/15 zorunlu bölme için TRAIN_DIR + TEST_DIR birleştirilir.
+    train_pool_ds = tf.keras.utils.image_dataset_from_directory(TRAIN_DIR, shuffle=True, **common)
+    test_pool_ds = tf.keras.utils.image_dataset_from_directory(TEST_DIR, shuffle=True, **common)
+    train_classes = train_pool_ds.class_names
+    test_classes = test_pool_ds.class_names
+    if set(train_classes) != set(test_classes):
+        raise ValueError(
+            "TRAIN_DIR ve TEST_DIR sınıf isimleri farklı; 70/15/15 birleştirme yapılamadı. "
+            f"TRAIN_DIR classes={train_classes}, TEST_DIR classes={test_classes}. "
+            "Her iki dizinde de aynı sınıf alt klasörlerinin bulunduğunu doğrulayın."
+        )
+    canonical_classes = sorted(train_classes)
+    if train_classes != canonical_classes or test_classes != canonical_classes:
+        train_pool_ds = tf.keras.utils.image_dataset_from_directory(
+            TRAIN_DIR, shuffle=True, class_names=canonical_classes, **common
+        )
+        test_pool_ds = tf.keras.utils.image_dataset_from_directory(
+            TEST_DIR, shuffle=True, class_names=canonical_classes, **common
+        )
 
-    val_ds = tf.keras.utils.image_dataset_from_directory(
-        TRAIN_DIR, validation_split=0.05, subset="validation",
-        shuffle=True, **common
-    )
+    all_ds = train_pool_ds.concatenate(test_pool_ds).unbatch()
 
-    test_ds = tf.keras.utils.image_dataset_from_directory(
-        TEST_DIR, shuffle=False, **common
-    )
+    train_n, val_n, test_n = compute_split_sizes(target_total)
+    # Sabit seed + reshuffle_each_iteration=False: alt küme seçimi tekrar üretilebilir olur.
+    # MAX_SHUFFLE_BUFFER sınırı bellek kullanımını dengeler.
+    shuffle_buffer = min(target_total, MAX_SHUFFLE_BUFFER)
+    all_ds = all_ds.shuffle(shuffle_buffer, seed=42, reshuffle_each_iteration=False).take(target_total)
 
-    # Veri alt kümesi: DATASET_SIZE önceliklidir, yoksa use_subset kontrolü yapılır
-    if DATASET_SIZE is not None:
-        train_n = int(DATASET_SIZE * 0.95)
-        val_n   = DATASET_SIZE - train_n
-        train_ds = train_ds.unbatch().shuffle(train_n * 3, seed=42).take(train_n).batch(batch_size)
-        val_ds   = val_ds.unbatch().shuffle(val_n * 3, seed=42).take(val_n).batch(batch_size)
-    elif use_subset:
-        train_ds = train_ds.unbatch().shuffle(TRAIN_SUBSET).take(TRAIN_SUBSET).batch(batch_size)
-        val_ds   = val_ds.unbatch().shuffle(VAL_SUBSET).take(VAL_SUBSET).batch(batch_size)
+    train_ds = all_ds.take(train_n).batch(batch_size)
+    remain_ds = all_ds.skip(train_n)
+    val_ds = remain_ds.take(val_n).batch(batch_size)
+    test_ds = remain_ds.skip(val_n).take(test_n).batch(batch_size)
 
     train_ds = train_ds.prefetch(AUTOTUNE)
     val_ds   = val_ds.prefetch(AUTOTUNE)
@@ -689,30 +760,7 @@ def final_evaluate_ghs_cnn(best_hp: HyperParams, epochs: int = 35):
     _gen_cache.clear()
     gc.collect()
 
-    common = dict(
-        image_size=IMG_SIZE,
-        batch_size=best_hp.batch_size,
-        label_mode='binary',
-        seed=42,
-    )
-
-    train_ds = tf.keras.utils.image_dataset_from_directory(
-        TRAIN_DIR, validation_split=0.05, subset="training",
-        shuffle=True, **common
-    )
-    val_ds = tf.keras.utils.image_dataset_from_directory(
-        TRAIN_DIR, validation_split=0.05, subset="validation",
-        shuffle=False, **common
-    )
-    test_ds = tf.keras.utils.image_dataset_from_directory(
-        TEST_DIR, shuffle=False, **common
-    )
-
-    if DATASET_SIZE is not None:
-        train_n = int(DATASET_SIZE * 0.95)
-        val_n   = DATASET_SIZE - train_n
-        train_ds = train_ds.unbatch().shuffle(train_n * 3, seed=42).take(train_n).batch(best_hp.batch_size)
-        val_ds   = val_ds.unbatch().shuffle(val_n * 3, seed=42).take(val_n).batch(best_hp.batch_size)
+    train_ds, val_ds, test_ds = create_datasets(best_hp.batch_size, use_subset=False)
 
     def mixup(images, labels, alpha=0.2):
         lam = tf.random.uniform([], 0.0, alpha)
@@ -727,7 +775,12 @@ def final_evaluate_ghs_cnn(best_hp: HyperParams, epochs: int = 35):
 
     model = build_cnn_model(best_hp)
 
-    n_train      = int(DATASET_SIZE * 0.95) if DATASET_SIZE else int(22564 * 0.95)
+    if DATASET_SIZE is not None:
+        n_train, _, _ = compute_split_sizes(normalize_total_for_split(DATASET_SIZE))
+    elif QUICK_TEST:
+        n_train, _, _ = compute_split_sizes(normalize_total_for_split(min(QUICK_TEST_TOTAL, get_total_image_count())))
+    else:
+        n_train, _, _ = compute_split_sizes(normalize_total_for_split(get_total_image_count()))
     total_steps  = epochs * max(n_train // best_hp.batch_size, 1)
     cosine_lr    = tf.keras.optimizers.schedules.CosineDecayRestarts(
         initial_learning_rate=best_hp.learning_rate,
@@ -1015,14 +1068,16 @@ def run():
 
     print("\n" + "=" * 70)
     print("🎯 G-HS + OBL + DİNAMİK PAR/BW ile CNN HİPERPARAMETRE OPTİMİZASYONU (v2)")
-    print("Dataset: Waste Classification (Organic vs Recyclable, 22500 görüntü)")
+    print(f"Dataset: Waste Classification (Organic vs Recyclable, toplam {get_total_image_count()} görüntü)")
     if DATASET_SIZE is not None:
-        train_n = int(DATASET_SIZE * 0.95)
-        val_n   = DATASET_SIZE - train_n
-        print(f"📊 VERİ BOYUTU: {DATASET_SIZE} görüntü kullanılacak "
-              f"(Eğitim ≈ {train_n}, Doğrulama ≈ {val_n}), IMG={IMG_SIZE}")
+        normalized_total = normalize_total_for_split(DATASET_SIZE)
+        train_n, val_n, test_n = compute_split_sizes(normalized_total)
+        print(f"📊 VERİ BOYUTU: {normalized_total} görüntü kullanılacak "
+              f"(Eğitim ≈ {train_n}, Doğrulama ≈ {val_n}, Test ≈ {test_n}), IMG={IMG_SIZE}")
     elif QUICK_TEST:
-        print(f"⚡ HIZLI TEST MODU: IMG={IMG_SIZE}, Eğitim={TRAIN_SUBSET}, Val={VAL_SUBSET} örnek")
+        normalized_total = normalize_total_for_split(min(QUICK_TEST_TOTAL, get_total_image_count()))
+        train_n, val_n, test_n = compute_split_sizes(normalized_total)
+        print(f"⚡ HIZLI TEST MODU: IMG={IMG_SIZE}, Eğitim={train_n}, Val={val_n}, Test={test_n} örnek")
     print("=" * 70)
 
     # G-HS parametreleri: hızlı test ↔ tam çalıştırma
@@ -1128,12 +1183,18 @@ def run():
             "optimization_type": "G-HS + OBL + Dynamic PAR/BW",
             "models_compared": ["G-HS-CNN v2", "Klasik CNN", "ResNet50", "MLP", "SVM", "Random Forest"],
             "dataset": (
-                f"Waste Classification ({DATASET_SIZE} images, {IMG_SIZE[0]}x{IMG_SIZE[1]})"
+                f"Waste Classification ({normalize_total_for_split(DATASET_SIZE)} images, 70/15/15, {IMG_SIZE[0]}x{IMG_SIZE[1]})"
                 if DATASET_SIZE is not None
                 else (
-                    f"Waste Classification (QUICK_TEST: {TRAIN_SUBSET} train, {VAL_SUBSET} val, {IMG_SIZE[0]}x{IMG_SIZE[1]})"
+                    (
+                        f"Waste Classification (QUICK_TEST 70/15/15, "
+                        f"total={normalize_total_for_split(min(QUICK_TEST_TOTAL, get_total_image_count()))}, {IMG_SIZE[0]}x{IMG_SIZE[1]})"
+                    )
                     if QUICK_TEST
-                    else f"Waste Classification (22500 images, {IMG_SIZE[0]}x{IMG_SIZE[1]})"
+                    else (
+                        f"Waste Classification ({normalize_total_for_split(get_total_image_count())} images, "
+                        f"70/15/15, {IMG_SIZE[0]}x{IMG_SIZE[1]})"
+                    )
                 )
             ),
             "best_hyperparameters": {
