@@ -210,7 +210,7 @@ def count_image_files(root_dir):
     """Verilen dizin altında desteklenen uzantılardaki görüntü dosyalarını say."""
     total = 0
     for dirpath, _, filenames in os.walk(root_dir):
-        total += sum(os.path.splitext(name)[1].lower() in VALID_IMAGE_EXTENSIONS for name in filenames)
+        total += sum(name.lower().endswith(VALID_IMAGE_EXTENSIONS) for name in filenames)
     return total
 
 
@@ -236,10 +236,6 @@ def compute_split_sizes(total_count):
         raise ValueError(
             f"Geçersiz 70/15/15 bölmesi: total={total_count}, "
             f"train={train_n}, val={val_n}, test={test_n}"
-        )
-    if train_n + val_n + test_n != total_count:
-        raise ValueError(
-            f"İç tutarlılık hatası: total={total_count} için 70/15/15 toplamı korunamadı."
         )
     return train_n, val_n, test_n
 
@@ -281,18 +277,28 @@ def create_datasets(batch_size, use_subset=QUICK_TEST):
     # 70/15/15 zorunlu bölme için TRAIN_DIR + TEST_DIR birleştirilir.
     train_pool_ds = tf.keras.utils.image_dataset_from_directory(TRAIN_DIR, shuffle=True, **common)
     test_pool_ds = tf.keras.utils.image_dataset_from_directory(TEST_DIR, shuffle=True, **common)
-    if train_pool_ds.class_names != test_pool_ds.class_names:
+    train_classes = train_pool_ds.class_names
+    test_classes = test_pool_ds.class_names
+    if set(train_classes) != set(test_classes):
         raise ValueError(
             "TRAIN_DIR ve TEST_DIR sınıf isimleri farklı; 70/15/15 birleştirme yapılamadı. "
-            f"TRAIN_DIR classes={train_pool_ds.class_names}, TEST_DIR classes={test_pool_ds.class_names}. "
-            "Her iki dizinde de aynı class alt klasörlerinin bulunduğunu doğrulayın."
+            f"TRAIN_DIR classes={train_classes}, TEST_DIR classes={test_classes}. "
+            "Her iki dizinde de aynı sınıf alt klasörlerinin bulunduğunu doğrulayın."
+        )
+    if train_classes != test_classes:
+        canonical_classes = sorted(train_classes)
+        train_pool_ds = tf.keras.utils.image_dataset_from_directory(
+            TRAIN_DIR, shuffle=True, class_names=canonical_classes, **common
+        )
+        test_pool_ds = tf.keras.utils.image_dataset_from_directory(
+            TEST_DIR, shuffle=True, class_names=canonical_classes, **common
         )
 
     all_ds = train_pool_ds.concatenate(test_pool_ds).unbatch()
 
     train_n, val_n, test_n = compute_split_sizes(target_total)
     # Sabit seed + reshuffle_each_iteration=False: alt küme seçimi tekrar üretilebilir olur.
-    shuffle_buffer = min(total_images, MAX_SHUFFLE_BUFFER)
+    shuffle_buffer = min(target_total, MAX_SHUFFLE_BUFFER)
     all_ds = all_ds.shuffle(shuffle_buffer, seed=42, reshuffle_each_iteration=False).take(target_total)
 
     train_ds = all_ds.take(train_n).batch(batch_size)
