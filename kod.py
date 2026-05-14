@@ -222,11 +222,16 @@ def get_total_image_count():
 
 def compute_split_sizes(total_count):
     """Toplam örnek sayısını sabit 70/15/15 oranına böl."""
-    if total_count < 3:
-        raise ValueError("70/15/15 bölmesi için en az 3 görüntü gerekli.")
+    if total_count < 7:
+        raise ValueError("70/15/15 bölmesi ve boş olmayan alt kümeler için en az 7 görüntü gerekli.")
     train_n = int(total_count * TRAIN_RATIO)
     val_n = int(total_count * VAL_RATIO)
     test_n = total_count - train_n - val_n
+    if min(train_n, val_n, test_n) < 1:
+        raise ValueError(
+            f"Geçersiz 70/15/15 bölmesi: total={total_count}, "
+            f"train={train_n}, val={val_n}, test={test_n}"
+        )
     return train_n, val_n, test_n
 
 
@@ -249,7 +254,10 @@ def create_datasets(batch_size, use_subset=QUICK_TEST):
     train_pool_ds = tf.keras.utils.image_dataset_from_directory(TRAIN_DIR, shuffle=True, **common)
     test_pool_ds = tf.keras.utils.image_dataset_from_directory(TEST_DIR, shuffle=True, **common)
     if train_pool_ds.class_names != test_pool_ds.class_names:
-        raise ValueError("TRAIN_DIR ve TEST_DIR class isimleri farklı; 70/15/15 birleştirme yapılamadı.")
+        raise ValueError(
+            "TRAIN_DIR ve TEST_DIR class isimleri farklı; 70/15/15 birleştirme yapılamadı. "
+            f"TRAIN_DIR classes={train_pool_ds.class_names}, TEST_DIR classes={test_pool_ds.class_names}"
+        )
 
     all_ds = train_pool_ds.concatenate(test_pool_ds).unbatch()
     total_images = get_total_image_count()
@@ -262,7 +270,8 @@ def create_datasets(batch_size, use_subset=QUICK_TEST):
         target_total = total_images
 
     train_n, val_n, test_n = compute_split_sizes(target_total)
-    all_ds = all_ds.shuffle(total_images, seed=42, reshuffle_each_iteration=False).take(target_total)
+    shuffle_buffer = min(total_images, 10_000)
+    all_ds = all_ds.shuffle(shuffle_buffer, seed=42, reshuffle_each_iteration=False).take(target_total)
 
     train_ds = all_ds.take(train_n).batch(batch_size)
     remain_ds = all_ds.skip(train_n)
