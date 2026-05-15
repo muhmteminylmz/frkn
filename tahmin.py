@@ -26,27 +26,27 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
 
 # ---------------------------------------------------------
-# 1) Global ayarlar
+# 1) Global settings
 # ---------------------------------------------------------
 @dataclass
 class Config:
-    # Veri dosyaları (repo kök dizini veya verilen dizin)
+    # Input data files (repo root or full path)
     generation_csv: str = "Plant_1_Generation_Data.csv"
     weather_csv: str = "Plant_1_Weather_Sensor_Data.csv"
 
-    # Hedef değişken: DC_POWER (varsayılan) veya TOTAL_YIELD
+    # Target variable: DC_POWER (default) or TOTAL_YIELD
     target_col: str = "DC_POWER"
 
-    # Zaman serisi pencere ayarları
-    window_size: int = 96        # 96 adım ~= 24 saat (15 dk çözünürlükte)
-    forecast_horizon: int = 1    # 1 adım ileri tahmin
+    # Time-series window settings
+    window_size: int = 96        # 96 steps ~= 24h (for 15-minute granularity)
+    forecast_horizon: int = 1    # 1-step ahead forecasting
 
-    # Eğitim ayarları
+    # Training settings
     seed: int = 42
     epochs: int = 30
     batch_size: int = 32
 
-    # Donanım dostu (GTX1650) G-HS ayarları
+    # Hardware-friendly (GTX1650) G-HS settings
     hms: int = 6
     ni: int = 12
     hmcr: float = 0.85
@@ -56,7 +56,7 @@ class Config:
     bw_max: float = 0.10
     optimize_epochs: int = 12
 
-    # Çıktılar
+    # Outputs
     result_plot_path: str = "solar_forecast_comparison.png"
     prediction_csv_path: str = "solar_predictions.csv"
 
@@ -414,7 +414,7 @@ DISCRETE_PARAMS = {"units", "batch_size", "conv_filters"}
 def nearest_choice(value: float, choices: List[int]) -> int:
     if not choices:
         raise ValueError("choices list cannot be empty")
-    return int(min(choices, key=lambda c: abs(c - value)))
+    return min(choices, key=lambda c: abs(c - value))
 
 
 def random_hp() -> ProposedHP:
@@ -464,7 +464,9 @@ def ghs_optimize(data: Dict[str, np.ndarray], cfg: Config) -> Tuple[ProposedHP, 
     convergence = []
 
     for t in range(1, cfg.ni + 1):
+        # PAR increases linearly to intensify local search over iterations.
         par_t = cfg.par_min + ((cfg.par_max - cfg.par_min) / cfg.ni) * t
+        # BW decays exponentially to reduce perturbation amplitude over time.
         bw_t = cfg.bw_max * np.exp(np.log(cfg.bw_min / cfg.bw_max) * (t / cfg.ni))
 
         best_base = HM[0]["hp"]
@@ -550,12 +552,12 @@ def plot_last_3_days(
     y_pred_lstm: np.ndarray,
     path: str,
 ) -> None:
-    # Times New Roman tez formatı
+    # Times New Roman for thesis-style formatting
     plt.rcParams["font.family"] = "Times New Roman"
 
     ts = pd.to_datetime(timestamps)
     if len(ts) == 0:
-        raise ValueError("No timestamps found for plotting")
+        raise ValueError("No timestamps available: test set is empty or timestamps array has zero length")
 
     end_ts = ts[-1]
     start_ts = end_ts - pd.Timedelta(days=3)
@@ -627,7 +629,7 @@ def run(cfg: Config) -> None:
 
     metrics_df = pd.DataFrame(metrics_rows)
 
-    # "En iyi" işaretleme (RMSE/MAE/MAPE küçük, R2 büyük)
+    # Composite score uses equal weights for all metrics for simple model ranking.
     metrics_df["ScoreRank"] = (
         metrics_df["RMSE"].rank(method="min")
         + metrics_df["MAE"].rank(method="min")
