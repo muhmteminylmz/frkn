@@ -601,7 +601,7 @@ def build_ghs(ws, nf, p):
     x = BatchNormalization()(x)
     x = Dropout(float(p["dropout"]))(x)
     # implementation=1 → DirectML uyumlu
-    x = GRU(int(p["gru_units"]), return_sequences=True,  implementation=1,
+    x = GRU(int(p["gru_units"]), return_sequences=True, implementation=1,
             reset_after=False, recurrent_dropout=float(p["dropout"]))(x)
     x = GRU(max(int(p["gru_units"]) // 2, 8), return_sequences=False,
             implementation=1, reset_after=False, recurrent_dropout=float(p["dropout"]))(x)
