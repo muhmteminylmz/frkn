@@ -1,6 +1,6 @@
 # =========================================================
 # Solar Power Generation Time Series Forecasting
-# Standard Modeller + G-HS (OBL + Dinamik PAR/BW) Optimize GRU
+# Standard Models + G-HS (OBL + Dynamic PAR/BW) Optimized GRU
 # =========================================================
 
 import os
@@ -412,6 +412,8 @@ DISCRETE_PARAMS = {"units", "batch_size", "conv_filters"}
 
 
 def nearest_choice(value: float, choices: List[int]) -> int:
+    if not choices:
+        raise ValueError("choices list cannot be empty")
     return int(min(choices, key=lambda c: abs(c - value)))
 
 
@@ -553,18 +555,18 @@ def plot_last_3_days(
 
     ts = pd.to_datetime(timestamps)
     if len(ts) == 0:
-        raise ValueError("Grafik için timestamp bulunamadı")
+        raise ValueError("No timestamps found for plotting")
 
     end_ts = ts[-1]
     start_ts = end_ts - pd.Timedelta(days=3)
     mask = ts >= start_ts
 
     plt.figure(figsize=(14, 6))
-    plt.plot(ts[mask], y_true[mask], color="black", linewidth=2.8, label="Gerçek Güneş Enerjisi Üretimi")
-    plt.plot(ts[mask], y_pred_ghs[mask], color="tab:red", linewidth=2.0, label="G-HS Model Tahmini")
-    plt.plot(ts[mask], y_pred_lstm[mask], color="tab:blue", linewidth=2.0, label="Standart LSTM Tahmini")
+    plt.plot(ts[mask], y_true[mask], color="black", linewidth=2.8, label="Actual Solar Power Generation")
+    plt.plot(ts[mask], y_pred_ghs[mask], color="tab:red", linewidth=2.0, label="G-HS Model Prediction")
+    plt.plot(ts[mask], y_pred_lstm[mask], color="tab:blue", linewidth=2.0, label="Standard LSTM Prediction")
 
-    plt.title("Test Seti Son 3 Gün: Gerçek vs Tahmin", fontsize=14)
+    plt.title("Test Set Last 3 Days: Actual vs Prediction", fontsize=14)
     plt.xlabel("DATE_TIME", fontsize=12)
     plt.ylabel("Power", fontsize=12)
     plt.grid(alpha=0.25)
