@@ -1,6 +1,6 @@
 # =========================================================
 # Solar Power Generation Time Series Forecasting
-# Standart Modeller + G-HS (OBL + Dinamik PAR/BW) Optimize GRU
+# Standard Modeller + G-HS (OBL + Dinamik PAR/BW) Optimize GRU
 # =========================================================
 
 import os
@@ -118,7 +118,7 @@ def exact_chronological_split(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFr
     n = len(df)
     train_n = int(n * 0.70)
     val_n = int(n * 0.15)
-    test_n = int(n * 0.15)
+    test_n = n - train_n - val_n
     if train_n + val_n + test_n != n:
         raise ValueError("70/15/15 bölmesi tam sağlanamadı")
     train_df = df.iloc[:train_n].copy()
@@ -425,6 +425,18 @@ def random_hp() -> ProposedHP:
     )
 
 
+def make_candidate_hp(base: ProposedHP, param: str, override_val: float) -> ProposedHP:
+    candidate = ProposedHP(
+        units=base.units,
+        dropout=base.dropout,
+        learning_rate=base.learning_rate,
+        batch_size=base.batch_size,
+        conv_filters=base.conv_filters,
+    )
+    setattr(candidate, param, float(override_val) if param in CONTINUOUS_PARAMS else int(override_val))
+    return candidate
+
+
 def evaluate_hp(hp: ProposedHP, data: Dict[str, np.ndarray], epochs: int) -> float:
     tf.keras.backend.clear_session()
     model = build_proposed_hybrid_model(data["x_train"].shape[1:], hp)
@@ -436,7 +448,7 @@ def evaluate_hp(hp: ProposedHP, data: Dict[str, np.ndarray], epochs: int) -> flo
 
 
 def ghs_optimize(data: Dict[str, np.ndarray], cfg: Config) -> Tuple[ProposedHP, List[float], float]:
-    print("\n�� G-HS optimizasyonu başlıyor (OBL + Dinamik PAR/BW)")
+    print("\n🎯 G-HS optimizasyonu başlıyor (OBL + Dinamik PAR/BW)")
 
     # Harmony Memory başlat
     HM = []
@@ -482,19 +494,8 @@ def ghs_optimize(data: Dict[str, np.ndarray], cfg: Config) -> Tuple[ProposedHP, 
                     rand_val = random.uniform(low, high)
                     opp_val = float(np.clip(low + high - rand_val, low, high))
 
-                def make_candidate(override_val):
-                    candidate = ProposedHP(
-                        units=best_base.units,
-                        dropout=best_base.dropout,
-                        learning_rate=best_base.learning_rate,
-                        batch_size=best_base.batch_size,
-                        conv_filters=best_base.conv_filters,
-                    )
-                    setattr(candidate, param, float(override_val) if param in CONTINUOUS_PARAMS else int(override_val))
-                    return candidate
-
-                fit_rand = evaluate_hp(make_candidate(rand_val), data, epochs=4)
-                fit_opp = evaluate_hp(make_candidate(opp_val), data, epochs=4)
+                fit_rand = evaluate_hp(make_candidate_hp(best_base, param, rand_val), data, epochs=4)
+                fit_opp = evaluate_hp(make_candidate_hp(best_base, param, opp_val), data, epochs=4)
                 value = rand_val if fit_rand <= fit_opp else opp_val
 
             new_params[param] = float(value) if param in CONTINUOUS_PARAMS else int(value)
@@ -579,7 +580,7 @@ def run(cfg: Config) -> None:
     configure_runtime()
 
     print("\n" + "=" * 70)
-    print("Solar Power Forecasting - Standart Modeller + G-HS Hibrit Model")
+    print("Solar Power Forecasting - Standard Modeller + G-HS Hibrit Model")
     print("=" * 70)
 
     data = prepare_datasets(cfg)
