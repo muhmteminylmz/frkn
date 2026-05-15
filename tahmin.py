@@ -241,14 +241,14 @@ def build(name, ws, nf):
     elif name == "lstm":
         # LSTM: implementation=1 → DirectML'de CudnnRNN'yi ATLAR
         # implementation=2 (varsayılan) → CudnnRNN çağırır → HATA!
-        m.add(LSTM(32, return_sequences=True,  implementation=1, recurrent_dropout=0.1)); m.add(Dropout(0.2))
-        m.add(LSTM(16, return_sequences=False, implementation=1, recurrent_dropout=0.1)); m.add(Dropout(0.2))
+        m.add(LSTM(32, return_sequences=True,  implementation=1, recurrent_dropout=0.1))
+        m.add(LSTM(16, return_sequences=False, implementation=1, recurrent_dropout=0.1))
         m.add(Dense(16, activation="relu"))
 
     elif name == "gru":
         # GRU: implementation=1 → DirectML uyumlu
-        m.add(GRU(32, return_sequences=True,  implementation=1, reset_after=False, recurrent_dropout=0.1)); m.add(Dropout(0.2))
-        m.add(GRU(16, return_sequences=False, implementation=1, reset_after=False, recurrent_dropout=0.1)); m.add(Dropout(0.2))
+        m.add(GRU(32, return_sequences=True,  implementation=1, reset_after=False, recurrent_dropout=0.1))
+        m.add(GRU(16, return_sequences=False, implementation=1, reset_after=False, recurrent_dropout=0.1))
         m.add(Dense(16, activation="relu"))
 
     m.add(Dense(1))
@@ -339,10 +339,8 @@ def build_model(ws, nf, cnn_filters=32, kernel_size=3,
     # implementation=1  →  DirectML uyumlu  ✓
     x = GRU(gru_units, return_sequences=True,
             implementation=1, reset_after=False, recurrent_dropout=0.1)(x)
-    x = Dropout(dropout_rate)(x)
     x = GRU(max(gru_units // 2, 8), return_sequences=False,
             implementation=1, reset_after=False, recurrent_dropout=0.1)(x)
-    x = Dropout(dropout_rate)(x)
 
     x   = Dense(16, activation="relu")(x)
     out = Dense(1)(x)
@@ -580,13 +578,13 @@ def build_standard(name, ws, nf):
         m.add(Dense(16, activation="relu"))
     elif name == "lstm":
         # implementation=1 → DirectML uyumlu
-        m.add(LSTM(32, return_sequences=True,  implementation=1, recurrent_dropout=0.1)); m.add(Dropout(0.2))
-        m.add(LSTM(16, return_sequences=False, implementation=1, recurrent_dropout=0.1)); m.add(Dropout(0.2))
+        m.add(LSTM(32, return_sequences=True,  implementation=1, recurrent_dropout=0.1))
+        m.add(LSTM(16, return_sequences=False, implementation=1, recurrent_dropout=0.1))
         m.add(Dense(16, activation="relu"))
     elif name == "gru":
         # implementation=1 → DirectML uyumlu
-        m.add(GRU(32, return_sequences=True,  implementation=1, reset_after=False, recurrent_dropout=0.1)); m.add(Dropout(0.2))
-        m.add(GRU(16, return_sequences=False, implementation=1, reset_after=False, recurrent_dropout=0.1)); m.add(Dropout(0.2))
+        m.add(GRU(32, return_sequences=True,  implementation=1, reset_after=False, recurrent_dropout=0.1))
+        m.add(GRU(16, return_sequences=False, implementation=1, reset_after=False, recurrent_dropout=0.1))
         m.add(Dense(16, activation="relu"))
     m.add(Dense(1))
     m.compile(Adam(1e-3), "mse")
@@ -605,10 +603,8 @@ def build_ghs(ws, nf, p):
     # implementation=1 → DirectML uyumlu
     x = GRU(int(p["gru_units"]), return_sequences=True,  implementation=1,
             reset_after=False, recurrent_dropout=0.1)(x)
-    x = Dropout(float(p["dropout"]))(x)
     x = GRU(max(int(p["gru_units"]) // 2, 8), return_sequences=False,
             implementation=1, reset_after=False, recurrent_dropout=0.1)(x)
-    x = Dropout(float(p["dropout"]))(x)
     x = Dense(16, activation="relu")(x)
     out = Dense(1)(x)
     m = Model(inp, out)
