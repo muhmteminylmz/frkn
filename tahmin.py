@@ -100,9 +100,9 @@ def load_plant(gen_f, wth_f):
     df["irradiation_temp"]  = df["IRRADIATION"] * df["MODULE_TEMPERATURE"]
     df["module_ambient_gap"] = df["MODULE_TEMPERATURE"] - df["AMBIENT_TEMPERATURE"]
     df["is_daylight"]       = (df["IRRADIATION"] > 0).astype(np.float32)
-    df["dc_roll_mean_4"]    = df["DC_POWER"].rolling(4, min_periods=1).mean().shift(1)
-    df["dc_roll_mean_16"]   = df["DC_POWER"].rolling(16, min_periods=1).mean().shift(1)
-    df["irr_roll_mean_4"]   = df["IRRADIATION"].rolling(4, min_periods=1).mean().shift(1)
+    df["dc_roll_mean_4"]    = df["DC_POWER"].shift(1).rolling(4, min_periods=1).mean()
+    df["dc_roll_mean_16"]   = df["DC_POWER"].shift(1).rolling(16, min_periods=1).mean()
+    df["irr_roll_mean_4"]   = df["IRRADIATION"].shift(1).rolling(4, min_periods=1).mean()
     
     # Hatalı/Fizik dışı sensör verilerini temizleme
     df[TARGET_COL] = df[TARGET_COL].where(df[TARGET_COL] >= 0, np.nan)
