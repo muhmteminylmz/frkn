@@ -37,6 +37,8 @@ TARGET_COL  = "DC_POWER"
 HORIZON     = 1
 TRAIN_RATIO = 0.70
 VAL_RATIO   = 0.15
+POSTPROC_ALPHA_GRID = np.linspace(0.6, 1.0, 5).tolist()
+POSTPROC_GATE_GRID  = np.linspace(0.0, 0.04, 9).tolist()
 SEED        = 42
 np.random.seed(SEED)
 
@@ -63,9 +65,14 @@ FEATURE_COLS = [
 ]
 
 def parse_dt(series):
-    parsed = pd.to_datetime(series, dayfirst=True, errors="coerce")
-    if parsed.isna().any():
-        parsed = parsed.where(parsed.notna(), pd.to_datetime(series, errors="coerce"))
+    values = series.astype(str).str.strip()
+    parsed = pd.to_datetime(values, format="%d-%m-%Y %H:%M", errors="coerce")
+    iso_mask = parsed.isna()
+    if iso_mask.any():
+        parsed.loc[iso_mask] = pd.to_datetime(values.loc[iso_mask], format="%Y-%m-%d %H:%M:%S", errors="coerce")
+    fallback_mask = parsed.isna()
+    if fallback_mask.any():
+        parsed.loc[fallback_mask] = pd.to_datetime(values.loc[fallback_mask], errors="coerce")
     return parsed
 
 def load_plant(gen_f, wth_f):
@@ -265,6 +272,8 @@ Xtr=np.load(f"{{D}}/X_train.npy"); ytr=np.load(f"{{D}}/y_train.npy"); Xv=np.load
 yv_real=np.load(f"{{D}}/y_val_real.npy")
 inv_info=json.load(open(f"{{D}}/inv_info.json"))
 feat_idx=json.load(open(f"{{D}}/feature_index.json"))
+POST_ALPHA=np.array({POSTPROC_ALPHA_GRID}, dtype=np.float32)
+POST_GATE=np.array({POSTPROC_GATE_GRID}, dtype=np.float32)
 nf=Xtr.shape[2]
 target_idx=int(feat_idx["DC_POWER"]); irr_idx=int(feat_idx["IRRADIATION"]); day_idx=int(feat_idx["is_daylight"])
 
@@ -282,8 +291,8 @@ def apply_postprocess(p_sc, X_sc, alpha=1.0, gate=0.0):
 
 def tune_postprocess(pred_sc, X_sc):
     best_rmse, best_cfg = 1e18, {{"alpha": 1.0, "gate": 0.0}}
-    for alpha in np.linspace(0.6, 1.0, 5):
-        for gate in np.linspace(0.0, 0.04, 9):
+    for alpha in POST_ALPHA:
+        for gate in POST_GATE:
             cand = inv_split(apply_postprocess(pred_sc, X_sc, float(alpha), float(gate)), "val")
             rmse = float(np.sqrt(np.mean((yv_real - cand) ** 2)))
             if rmse < best_rmse:
