@@ -93,9 +93,9 @@ def load_plant(gen_f, wth_f):
     df["irradiation_temp"]  = df["IRRADIATION"] * df["MODULE_TEMPERATURE"]
     df["module_ambient_gap"] = df["MODULE_TEMPERATURE"] - df["AMBIENT_TEMPERATURE"]
     df["is_daylight"]       = (df["IRRADIATION"] > 0).astype(np.float32)
-    df["dc_roll_mean_4"]    = df["DC_POWER"].rolling(4, min_periods=1).mean()
-    df["dc_roll_mean_16"]   = df["DC_POWER"].rolling(16, min_periods=1).mean()
-    df["irr_roll_mean_4"]   = df["IRRADIATION"].rolling(4, min_periods=1).mean()
+    df["dc_roll_mean_4"]    = df["DC_POWER"].rolling(4, min_periods=1).mean().shift(1)
+    df["dc_roll_mean_16"]   = df["DC_POWER"].rolling(16, min_periods=1).mean().shift(1)
+    df["irr_roll_mean_4"]   = df["IRRADIATION"].rolling(4, min_periods=1).mean().shift(1)
     
     # Hatalı/Fizik dışı sensör verilerini temizleme
     df[TARGET_COL] = df[TARGET_COL].where(df[TARGET_COL] >= 0, np.nan)
@@ -282,8 +282,8 @@ def apply_postprocess(p_sc, X_sc, alpha=1.0, gate=0.0):
 
 def tune_postprocess(pred_sc, X_sc):
     best_rmse, best_cfg = 1e18, {{"alpha": 1.0, "gate": 0.0}}
-    for alpha in np.linspace(0.6, 1.0, 9):
-        for gate in np.linspace(0.0, 0.08, 17):
+    for alpha in np.linspace(0.6, 1.0, 5):
+        for gate in np.linspace(0.0, 0.04, 9):
             cand = inv_split(apply_postprocess(pred_sc, X_sc, float(alpha), float(gate)), "val")
             rmse = float(np.sqrt(np.mean((yv_real - cand) ** 2)))
             if rmse < best_rmse:
@@ -318,7 +318,7 @@ def build_dcn(filters=96, kernel_size=3, n_layers=6, dropout=0.15, lr=7e-4):
     x = Dense(max(filters // 2, 32), activation="swish")(x)
     x = Dropout(dropout / 2)(x)
     m = Model(inp, Dense(1)(x), name="G_HS_DCN")
-    m.compile(Adam(lr), tf.keras.losses.Huber())
+    m.compile(Adam(learning_rate=lr), tf.keras.losses.Huber())
     return m
 
 def eval_m(p):
@@ -411,7 +411,7 @@ def b_dcn(p):
     z = Dropout(dropout)(z)
     z = Dense(max(filters // 2, 32), activation="swish")(z)
     z = Dropout(dropout / 2)(z)
-    m = Model(inp, Dense(1)(z)); m.compile("adam", tf.keras.losses.Huber()); return m
+    m = Model(inp, Dense(1)(z)); m.compile(Adam(learning_rate=float(p["lr"])), tf.keras.losses.Huber()); return m
 
 def apply_postprocess(p_sc, X_sc, cfg):
     alpha = float(cfg.get("alpha", 1.0)); gate = float(cfg.get("gate", 0.0))
