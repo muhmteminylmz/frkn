@@ -37,6 +37,8 @@ TARGET_COL  = "DC_POWER"
 HORIZON     = 1
 TRAIN_RATIO = 0.70
 VAL_RATIO   = 0.15
+POSTPROC_ALPHA_GRID = np.linspace(0.6, 1.0, 5).tolist()
+POSTPROC_GATE_GRID  = np.linspace(0.0, 0.04, 9).tolist()
 SEED        = 42
 np.random.seed(SEED)
 
@@ -55,16 +57,30 @@ PLANTS = {
 }
 
 FEATURE_COLS = [
-    "DC_POWER", "AMBIENT_TEMPERATURE", "MODULE_TEMPERATURE",
-    "IRRADIATION", "hour_sin", "hour_cos", "doy_sin", "doy_cos", "PLANT_ID",
+    "DC_POWER", "AC_POWER", "DAILY_YIELD",
+    "AMBIENT_TEMPERATURE", "MODULE_TEMPERATURE", "IRRADIATION",
+    "irradiation_temp", "module_ambient_gap", "is_daylight",
+    "dc_roll_mean_4", "dc_roll_mean_16", "irr_roll_mean_4",
+    "hour_sin", "hour_cos", "doy_sin", "doy_cos", "PLANT_ID",
 ]
+
+def parse_dt(series):
+    values = series.astype(str).str.strip()
+    parsed = pd.to_datetime(values, format="%d-%m-%Y %H:%M", errors="coerce")
+    iso_mask = parsed.isna()
+    if iso_mask.any():
+        parsed.loc[iso_mask] = pd.to_datetime(values.loc[iso_mask], format="%Y-%m-%d %H:%M:%S", errors="coerce")
+    fallback_mask = parsed.isna()
+    if fallback_mask.any():
+        parsed.loc[fallback_mask] = pd.to_datetime(values.loc[fallback_mask], errors="coerce")
+    return parsed
 
 def load_plant(gen_f, wth_f):
     gen = pd.read_csv(gen_f)
     wth = pd.read_csv(wth_f)
     
-    gen["DATE_TIME"] = pd.to_datetime(gen["DATE_TIME"], dayfirst=True)
-    wth["DATE_TIME"] = pd.to_datetime(wth["DATE_TIME"], dayfirst=True)
+    gen["DATE_TIME"] = parse_dt(gen["DATE_TIME"])
+    wth["DATE_TIME"] = parse_dt(wth["DATE_TIME"])
     
     # Inverterleri topluyoruz ki tüm santralin enerjisi tek bir sütunda çıksın (Sum)
     gen_agg = gen.groupby("DATE_TIME", as_index=False)[["DC_POWER", "AC_POWER", "DAILY_YIELD"]].sum()
@@ -81,6 +97,12 @@ def load_plant(gen_f, wth_f):
     df["hour_cos"]    = np.cos(2 * np.pi * df["hour"] / 24)
     df["doy_sin"]     = np.sin(2 * np.pi * df["day_of_year"] / 365.25)
     df["doy_cos"]     = np.cos(2 * np.pi * df["day_of_year"] / 365.25)
+    df["irradiation_temp"]  = df["IRRADIATION"] * df["MODULE_TEMPERATURE"]
+    df["module_ambient_gap"] = df["MODULE_TEMPERATURE"] - df["AMBIENT_TEMPERATURE"]
+    df["is_daylight"]       = (df["IRRADIATION"] > 0).astype(np.float32)
+    df["dc_roll_mean_4"]    = df["DC_POWER"].shift(1).rolling(4, min_periods=1).mean()
+    df["dc_roll_mean_16"]   = df["DC_POWER"].shift(1).rolling(16, min_periods=1).mean()
+    df["irr_roll_mean_4"]   = df["IRRADIATION"].shift(1).rolling(4, min_periods=1).mean()
     
     # Hatalı/Fizik dışı sensör verilerini temizleme
     df[TARGET_COL] = df[TARGET_COL].where(df[TARGET_COL] >= 0, np.nan)
@@ -138,22 +160,37 @@ X_val   = concat_splits("X_val");   y_val   = concat_splits("y_val")
 X_test  = concat_splits("X_test");  y_test  = concat_splits("y_test")
 n_features = X_train.shape[2]
 
+y_val_real_parts = []
 y_test_real_parts = []
 for pid in sorted(plant_data):
     p    = plant_data[pid]
+    val_part = p["y_val"].flatten() / p["sc_scale"] + p["sc_min"]
     part = p["y_test"].flatten() / p["sc_scale"] + p["sc_min"]
+    y_val_real_parts.append(val_part)
     y_test_real_parts.append(part)
+y_val_real = np.concatenate(y_val_real_parts)
 y_test_real = np.concatenate(y_test_real_parts)
 
 print(f"\n  Birleşik Veri: Train={X_train.shape[0]}  Val={X_val.shape[0]}  Test={X_test.shape[0]}  Özellik={n_features}")
 
 for name, arr in [("X_train",X_train), ("y_train",y_train), ("X_val",X_val), ("y_val",y_val), 
-                  ("X_test",X_test), ("y_test",y_test), ("y_test_real", y_test_real)]:
+                  ("X_test",X_test), ("y_test",y_test), ("y_val_real", y_val_real),
+                  ("y_test_real", y_test_real)]:
     np.save(os.path.join(DATA_DIR, f"{name}.npy"), arr)
 
-inv_info = {str(pid): {"sc_min": plant_data[pid]["sc_min"], "sc_scale": plant_data[pid]["sc_scale"], "test_size": int(plant_data[pid]["X_test"].shape[0])} for pid in plant_data}
+inv_info = {
+    str(pid): {
+        "sc_min": plant_data[pid]["sc_min"],
+        "sc_scale": plant_data[pid]["sc_scale"],
+        "val_size": int(plant_data[pid]["X_val"].shape[0]),
+        "test_size": int(plant_data[pid]["X_test"].shape[0]),
+    }
+    for pid in plant_data
+}
 with open(os.path.join(DATA_DIR, "inv_info.json"), "w") as f:
     json.dump(inv_info, f, indent=2)
+with open(os.path.join(DATA_DIR, "feature_index.json"), "w") as f:
+    json.dump({c: i for i, c in enumerate(FEATURE_COLS)}, f, indent=2)
 
 # ==============================================================================
 # BÖLÜM 2 – WORKER DOSYALARI (TÜMÜ GPU DESTEKLİ)
@@ -225,35 +262,87 @@ for g in tf.config.list_physical_devices("GPU"):
 
 from tensorflow.keras import backend as K
 from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Input, Conv1D, Dense, Dropout, BatchNormalization, Add, Activation, Lambda
+from tensorflow.keras.layers import Input, Conv1D, Dense, Dropout, Add, Lambda, Multiply
+from tensorflow.keras.layers import GlobalAveragePooling1D, GlobalMaxPooling1D, Concatenate, SpatialDropout1D, LayerNormalization
 from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 
 D="{DATA_DIR}"; W="{WEIGHTS_DIR}"; WS={WINDOW_SIZE}
 Xtr=np.load(f"{{D}}/X_train.npy"); ytr=np.load(f"{{D}}/y_train.npy"); Xv=np.load(f"{{D}}/X_val.npy"); yv=np.load(f"{{D}}/y_val.npy")
+yv_real=np.load(f"{{D}}/y_val_real.npy")
+inv_info=json.load(open(f"{{D}}/inv_info.json"))
+feat_idx=json.load(open(f"{{D}}/feature_index.json"))
+POST_ALPHA=np.array({POSTPROC_ALPHA_GRID}, dtype=np.float32)
+POST_GATE=np.array({POSTPROC_GATE_GRID}, dtype=np.float32)
 nf=Xtr.shape[2]
+target_idx=int(feat_idx["DC_POWER"]); irr_idx=int(feat_idx["IRRADIATION"]); day_idx=int(feat_idx["is_daylight"])
 
-def build_dcn(filters=64, kernel_size=3, n_layers=5, dropout=0.2, lr=1e-3):
+def inv_split(p_sc, split):
+    segs=[]; idx=0
+    for pid in sorted(int(k) for k in inv_info):
+        inf=inv_info[str(pid)]; n=int(inf[f"{{split}}_size"])
+        segs.append(p_sc[idx:idx+n] / float(inf["sc_scale"]) + float(inf["sc_min"])); idx += n
+    return np.concatenate(segs)
+
+def apply_postprocess(p_sc, X_sc, alpha=1.0, gate=0.0):
+    out = alpha * p_sc + (1.0 - alpha) * X_sc[:, -1, target_idx]
+    out = np.where((X_sc[:, -1, day_idx] < 0.5) | (X_sc[:, -1, irr_idx] <= gate), 0.0, out)
+    return np.clip(out, 0.0, None)
+
+def tune_postprocess(pred_sc, X_sc):
+    best_rmse, best_cfg = 1e18, {{"alpha": 1.0, "gate": 0.0}}
+    for alpha in POST_ALPHA:
+        for gate in POST_GATE:
+            cand = inv_split(apply_postprocess(pred_sc, X_sc, float(alpha), float(gate)), "val")
+            rmse = float(np.sqrt(np.mean((yv_real - cand) ** 2)))
+            if rmse < best_rmse:
+                best_rmse = rmse
+                best_cfg = {{"alpha": float(alpha), "gate": float(gate)}}
+    return best_rmse, best_cfg
+
+def se_block(x, filters):
+    s = GlobalAveragePooling1D()(x)
+    s = Dense(max(filters // 8, 8), activation="relu")(s)
+    s = Dense(filters, activation="sigmoid")(s)
+    s = Lambda(lambda t: tf.expand_dims(t, 1))(s)
+    return Multiply()([x, s])
+
+def build_dcn(filters=96, kernel_size=3, n_layers=6, dropout=0.15, lr=7e-4):
     inp = Input(shape=(WS, nf))
-    x = Activation("relu")(BatchNormalization()(Conv1D(filters, 1, padding="causal")(inp)))
+    x = LayerNormalization()(Conv1D(filters, 1, padding="causal")(inp))
     for i in range(n_layers):
         res = x
-        x = Activation("relu")(Conv1D(filters, kernel_size, padding="causal", dilation_rate=2**i)(x))
-        x = Dropout(dropout)(BatchNormalization()(x))
-        x = Activation("relu")(Add()([BatchNormalization()(Conv1D(filters, kernel_size, padding="causal", dilation_rate=2**i)(x)), res]))
-    x = Lambda(lambda t: t[:, -1, :])(x)
-    x = Dense(64, activation="relu")(x)
-    m = Model(inp, Dense(1)(Dropout(dropout)(x)), name="G_HS_DCN")
-    m.compile(Adam(lr), "mse"); return m
+        dil = 2**i
+        x = Conv1D(filters, kernel_size, padding="causal", dilation_rate=dil, activation="swish")(x)
+        x = LayerNormalization()(x)
+        x = SpatialDropout1D(dropout)(x)
+        x = Conv1D(filters, kernel_size, padding="causal", dilation_rate=dil, activation="swish")(x)
+        x = LayerNormalization()(x)
+        x = se_block(x, filters)
+        x = Add()([x, res])
+    x_last = Lambda(lambda t: t[:, -1, :])(x)
+    x = Concatenate()([x_last, GlobalAveragePooling1D()(x), GlobalMaxPooling1D()(x)])
+    x = Dense(max(filters, 64), activation="swish")(x)
+    x = Dropout(dropout)(x)
+    x = Dense(max(filters // 2, 32), activation="swish")(x)
+    x = Dropout(dropout / 2)(x)
+    m = Model(inp, Dense(1)(x), name="G_HS_DCN")
+    m.compile(Adam(learning_rate=lr), tf.keras.losses.Huber())
+    return m
 
 def eval_m(p):
     K.clear_session(); gc.collect()
     m = build_dcn(int(p["f"]), int(p["k"]), int(p["l"]), float(p["d"]), float(p["lr"]))
     h = m.fit(Xtr, ytr, batch_size=int(p["b"]), validation_data=(Xv, yv),
-              epochs={EP_HS}, callbacks=[EarlyStopping("val_loss", patience=5, restore_best_weights=True)], verbose=0)
-    return float(min(h.history["val_loss"]))
+              epochs={EP_HS},
+              callbacks=[EarlyStopping("val_loss", patience=6, restore_best_weights=True),
+                         ReduceLROnPlateau("val_loss", patience=3, factor=0.5, min_lr=1e-5)],
+              verbose=0)
+    pred_v = m.predict(Xv, batch_size=256, verbose=0).flatten()
+    score, _ = tune_postprocess(pred_v, Xv)
+    return score
 
-SPACE = {{"lr":(5e-4,3e-3,False), "f":(32,128,True), "k":(2,4,True), "l":(4,6,True), "d":(0.1,0.3,False), "b":(32,64,True)}}
+SPACE = {{"lr":(3e-4,2e-3,False), "f":(64,128,True), "k":(2,4,True), "l":(4,6,True), "d":(0.08,0.22,False), "b":(16,64,True)}}
 KEYS = list(SPACE.keys())
 def rh(): return [int(round(np.random.uniform(lb, ub))) if ii else float(np.random.uniform(lb, ub)) for lb, ub, ii in SPACE.values()]
 def h2p(h): return {{k: h[i] for i, k in enumerate(KEYS)}}
@@ -279,7 +368,13 @@ bp = h2p(best_h); print(f"GHS_BEST:{{json.dumps(bp)}}", flush=True)
 
 m = build_dcn(int(bp["f"]), int(bp["k"]), int(bp["l"]), float(bp["d"]), float(bp["lr"]))
 m.fit(Xtr, ytr, batch_size=int(bp["b"]), validation_data=(Xv, yv),
-      epochs=200, callbacks=[EarlyStopping("val_loss", patience=15, restore_best_weights=True)], verbose=0)
+      epochs=200,
+      callbacks=[EarlyStopping("val_loss", patience=15, restore_best_weights=True),
+                 ReduceLROnPlateau("val_loss", patience=5, factor=0.5, min_lr=1e-5)],
+      verbose=0)
+post_rmse, post_cfg = tune_postprocess(m.predict(Xv, batch_size=256, verbose=0).flatten(), Xv)
+with open(f"{{W}}/dcn_postprocess.json", "w") as f: json.dump(post_cfg, f)
+print(f"POSTPROC_BEST:{{json.dumps({{'rmse': post_rmse, **post_cfg}})}}", flush=True)
 m.save_weights(f"{{W}}/dcn.weights.h5"); print("SAVED:dcn", flush=True)
 '''
 
@@ -292,25 +387,56 @@ for g in tf.config.list_physical_devices("GPU"):
     except: pass
 
 from tensorflow.keras.models import Sequential, Model
-from tensorflow.keras.layers import Input, Dense, Dropout, BatchNormalization, Conv1D, MaxPooling1D, Flatten, SimpleRNN, LSTM, GRU, Add, Activation, Lambda
+from tensorflow.keras.layers import Input, Dense, Dropout, BatchNormalization, Conv1D, MaxPooling1D, Flatten, SimpleRNN, LSTM, GRU, Add, Lambda, Multiply
+from tensorflow.keras.layers import GlobalAveragePooling1D, GlobalMaxPooling1D, Concatenate, SpatialDropout1D, LayerNormalization
 MN = sys.argv[1]
 D="{DATA_DIR}"; W="{WEIGHTS_DIR}"; WS={WINDOW_SIZE}; Xt=np.load(f"{{D}}/X_test.npy"); nf=Xt.shape[2]
+feat_idx=json.load(open(f"{{D}}/feature_index.json"))
+target_idx=int(feat_idx["DC_POWER"]); irr_idx=int(feat_idx["IRRADIATION"]); day_idx=int(feat_idx["is_daylight"])
 
 def b_cnn(): m=Sequential([Input(shape=(WS,nf)),Conv1D(64,3,activation="relu",padding="same"),BatchNormalization(),MaxPooling1D(2),Conv1D(32,3,activation="relu",padding="same"),BatchNormalization(),MaxPooling1D(2),Flatten(),Dense(32,activation="relu"),Dropout(0.2),Dense(1)]); m.compile("adam","mse"); return m
 def b_rnn(n): m=Sequential([Input(shape=(WS,nf)), {{"rnn":SimpleRNN,"lstm":LSTM,"gru":GRU}}[n](32,return_sequences=False), Dropout(0.2), Dense(1)]); m.compile("adam","mse"); return m
+def se_block(x, filters):
+    s=GlobalAveragePooling1D()(x)
+    s=Dense(max(filters//8,8),activation="relu")(s)
+    s=Dense(filters,activation="sigmoid")(s)
+    s=Lambda(lambda t: tf.expand_dims(t,1))(s)
+    return Multiply()([x,s])
 def b_dcn(p):
-    inp = Input(shape=(WS, nf)); x = Activation("relu")(BatchNormalization()(Conv1D(int(p["f"]), 1, padding="causal")(inp)))
-    for i in range(int(p["l"])):
-        res = x; x = Activation("relu")(Conv1D(int(p["f"]), int(p["k"]), padding="causal", dilation_rate=2**i)(x))
-        x = Dropout(float(p["d"]))(BatchNormalization()(x)); x = Activation("relu")(Add()([BatchNormalization()(Conv1D(int(p["f"]), int(p["k"]), padding="causal", dilation_rate=2**i)(x)), res]))
-    m = Model(inp, Dense(1)(Dropout(float(p["d"]))(Dense(64, activation="relu")(Lambda(lambda t: t[:, -1, :])(x))))); m.compile("adam", "mse"); return m
+    filters, kernel, layers = int(p["f"]), int(p["k"]), int(p["l"])
+    dropout = float(p["d"])
+    inp = Input(shape=(WS, nf)); x = LayerNormalization()(Conv1D(filters, 1, padding="causal")(inp))
+    for i in range(layers):
+        res = x; dil = 2**i
+        x = Conv1D(filters, kernel, padding="causal", dilation_rate=dil, activation="swish")(x)
+        x = LayerNormalization()(x)
+        x = SpatialDropout1D(dropout)(x)
+        x = Conv1D(filters, kernel, padding="causal", dilation_rate=dil, activation="swish")(x)
+        x = LayerNormalization()(x)
+        x = se_block(x, filters)
+        x = Add()([x, res])
+    z = Concatenate()([Lambda(lambda t: t[:, -1, :])(x), GlobalAveragePooling1D()(x), GlobalMaxPooling1D()(x)])
+    z = Dense(max(filters, 64), activation="swish")(z)
+    z = Dropout(dropout)(z)
+    z = Dense(max(filters // 2, 32), activation="swish")(z)
+    z = Dropout(dropout / 2)(z)
+    m = Model(inp, Dense(1)(z)); m.compile(Adam(learning_rate=float(p["lr"])), tf.keras.losses.Huber()); return m
+
+def apply_postprocess(p_sc, X_sc, cfg):
+    alpha = float(cfg.get("alpha", 1.0)); gate = float(cfg.get("gate", 0.0))
+    out = alpha * p_sc + (1.0 - alpha) * X_sc[:, -1, target_idx]
+    out = np.where((X_sc[:, -1, day_idx] < 0.5) | (X_sc[:, -1, irr_idx] <= gate), 0.0, out)
+    return np.clip(out, 0.0, None)
 
 if MN=="cnn": m=b_cnn()
 elif MN in ["rnn","lstm","gru"]: m=b_rnn(MN)
 elif MN=="dcn": m=b_dcn(json.load(open(f"{{W}}/dcn_best_params.json")))
 
 m.load_weights(f"{{W}}/{{MN}}.weights.h5")
-np.save(f"{{D}}/pred_{{MN}}.npy", m.predict(Xt, batch_size=32, verbose=0).flatten())
+pred = m.predict(Xt, batch_size=32, verbose=0).flatten()
+if MN=="dcn" and os.path.exists(f"{{W}}/dcn_postprocess.json"):
+    pred = apply_postprocess(pred, Xt, json.load(open(f"{{W}}/dcn_postprocess.json")))
+np.save(f"{{D}}/pred_{{MN}}.npy", pred)
 print(f"PRED_SAVED:{{MN}}",flush=True)
 '''
 
